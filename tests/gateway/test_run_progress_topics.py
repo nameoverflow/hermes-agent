@@ -555,6 +555,47 @@ class VerboseAgent:
         }
 
 
+class RepeatedDiscordCommandAgent:
+    RAW_COMMAND = "cd /tmp/hermes-agent && python -m pytest tests/gateway/test_run_progress_topics.py -q"
+
+    def __init__(self, **kwargs):
+        self.tool_progress_callback = kwargs.get("tool_progress_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        self.tool_progress_callback("tool.started", "terminal", self.RAW_COMMAND, {})
+        time.sleep(0.35)
+        self.tool_progress_callback("tool.started", "terminal", self.RAW_COMMAND, {})
+        time.sleep(0.35)
+        return {
+            "final_response": "done",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
+class DiscordVerboseCommandAgent:
+    RAW_COMMAND = "python -m pytest tests/gateway/test_run_progress_topics.py -q"
+
+    def __init__(self, **kwargs):
+        self.tool_progress_callback = kwargs.get("tool_progress_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        self.tool_progress_callback(
+            "tool.started",
+            "terminal",
+            None,
+            {"command": self.RAW_COMMAND},
+        )
+        time.sleep(0.35)
+        return {
+            "final_response": "done",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
 async def _run_with_agent(
     monkeypatch,
     tmp_path,
@@ -931,7 +972,7 @@ async def test_run_agent_drops_tool_progress_after_generation_invalidation(monke
 
     async def send_and_invalidate(chat_id, content, reply_to=None, metadata=None):
         result = await original_send(chat_id, content, reply_to=reply_to, metadata=metadata)
-        if "first command" in content and not invalidated["done"]:
+        if "terminal..." in content and not invalidated["done"]:
             invalidated["done"] = True
             runner._invalidate_session_run_generation(session_key, reason="test_stop")
         return result
@@ -951,8 +992,10 @@ async def test_run_agent_drops_tool_progress_after_generation_invalidation(monke
     all_progress_text = " ".join(call["content"] for call in adapter.sent)
     all_progress_text += " ".join(call["content"] for call in adapter.edits)
     assert result["final_response"] == "done"
-    assert 'first command' in all_progress_text
+    assert "terminal..." in all_progress_text
+    assert 'first command' not in all_progress_text
     assert 'second command' not in all_progress_text
+    assert "×2" not in all_progress_text
 
 
 @pytest.mark.asyncio
@@ -1039,6 +1082,57 @@ async def test_keep_typing_stops_immediately_when_interrupt_event_is_set():
     ]
     assert len(normal_typing_calls) == 1
     assert len(stopped_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_discord_progress_hides_raw_command_and_dedupes_nonverbose(monkeypatch, tmp_path):
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        RepeatedDiscordCommandAgent,
+        session_id="sess-discord-hidden-preview",
+        platform=Platform.DISCORD,
+        chat_id="dm-discord-preview",
+        chat_type="dm",
+        thread_id=None,
+        config_data={"display": {"platforms": {"discord": {"tool_progress": "all"}}}},
+    )
+
+    assert result["final_response"] == "done"
+    all_content = "\n".join(call["content"] for call in adapter.sent)
+    all_content += "\n".join(call["content"] for call in adapter.edits)
+    assert adapter.sent
+    assert RepeatedDiscordCommandAgent.RAW_COMMAND not in all_content
+    assert "pytest tests/gateway" not in all_content
+    assert 'terminal: "' not in all_content
+    assert "terminal..." in all_content
+    assert "×2" in all_content
+    assert len(adapter.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_discord_verbose_progress_keeps_command_args(monkeypatch, tmp_path):
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        DiscordVerboseCommandAgent,
+        session_id="sess-discord-verbose-preview",
+        platform=Platform.DISCORD,
+        chat_id="dm-discord-verbose",
+        chat_type="dm",
+        thread_id=None,
+        config_data={
+            "display": {
+                "tool_preview_length": 0,
+                "platforms": {"discord": {"tool_progress": "verbose"}},
+            },
+        },
+    )
+
+    assert result["final_response"] == "done"
+    all_content = "\n".join(call["content"] for call in adapter.sent)
+    all_content += "\n".join(call["content"] for call in adapter.edits)
+    assert DiscordVerboseCommandAgent.RAW_COMMAND in all_content
 
 
 @pytest.mark.asyncio
