@@ -80,6 +80,15 @@ class TestResolveDisplaySetting:
         assert resolve_display_setting(config, "telegram", "tool_progress") == "all"
 
 
+    def test_global_string_bool_normalised_for_boolean_display_settings(self):
+        """String booleans are normalized for boolean display settings."""
+        from gateway.display_config import resolve_display_setting
+
+        config = {"display": {"platforms": {"discord": {"interim_assistant_messages": "false"}}}}
+
+        assert resolve_display_setting(config, "discord", "interim_assistant_messages") is False
+
+
 # ---------------------------------------------------------------------------
 # Backward compatibility: tool_progress_overrides
 # ---------------------------------------------------------------------------
