@@ -160,6 +160,22 @@ async def test_send_does_not_retry_on_unrelated_errors():
     assert send_calls[0]["reference"] is reference_obj
 
 
+@pytest.mark.asyncio
+async def test_delete_message_fetches_and_deletes_discord_message():
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="***"))
+
+    msg = SimpleNamespace(delete=AsyncMock())
+    channel = SimpleNamespace(fetch_message=AsyncMock(return_value=msg))
+    adapter._client = SimpleNamespace(
+        get_channel=lambda _chat_id: channel,
+        fetch_channel=AsyncMock(),
+    )
+
+    assert await adapter.delete_message("555", "777") is True
+    channel.fetch_message.assert_awaited_once_with(777)
+    msg.delete.assert_awaited_once()
+
+
 # ---------------------------------------------------------------------------
 # Forum channel tests
 # ---------------------------------------------------------------------------

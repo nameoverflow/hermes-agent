@@ -14226,8 +14226,9 @@ class GatewayRunner:
         # Auto-cleanup of temporary progress bubbles (Telegram + any adapter
         # that implements ``delete_message``). When enabled via
         # ``display.platforms.<platform>.cleanup_progress: true``, message IDs
-        # from the tool-progress / "Still working..." / status-callback bubbles
-        # are collected here and deleted after the final response lands.
+        # from the tool-progress / "Still working..." / status-callback /
+        # deferred background-review bubbles are collected here and deleted
+        # after the final response lands.
         # Failed runs skip cleanup so the bubbles remain as breadcrumbs.
         _cleanup_progress = bool(
             resolve_display_setting(user_config, platform_key, "cleanup_progress")
@@ -14240,6 +14241,34 @@ class GatewayRunner:
             _cleanup_progress = False
             _cleanup_adapter = None
         _cleanup_msg_ids: List[str] = []
+        _cleanup_send_futures: List[Any] = []
+
+        def _track_cleanup_send_future(fut: Any) -> None:
+            """Track the SendResult from a temporary bubble for later deletion.
+
+            Some temporary messages (notably deferred background-review status
+            messages) are sent from post-delivery callbacks immediately before
+            the cleanup callback runs.  Recording both the future and its
+            eventual message id lets cleanup wait briefly for those sends and
+            delete them too, instead of snapshotting too early.
+            """
+            if not _cleanup_progress or fut is None:
+                return
+            _cleanup_send_futures.append(fut)
+
+            def _track_result(done_fut: Any) -> None:
+                try:
+                    res = done_fut.result()
+                except Exception:
+                    return
+                mid = getattr(res, "message_id", None)
+                if getattr(res, "success", False) and mid:
+                    _cleanup_msg_ids.append(str(mid))
+
+            try:
+                fut.add_done_callback(_track_result)
+            except Exception:
+                pass
         # First-touch onboarding latch: fires at most once per run, even if
         # several tools exceed the threshold.
         long_tool_hint_fired = [False]
@@ -14647,16 +14676,7 @@ class GatewayRunner:
                     ),
                     _loop_for_step,
                 )
-                if _cleanup_progress:
-                    def _track_status_id(fut) -> None:
-                        try:
-                            res = fut.result()
-                        except Exception:
-                            return
-                        mid = getattr(res, "message_id", None)
-                        if getattr(res, "success", False) and mid:
-                            _cleanup_msg_ids.append(str(mid))
-                    _fut.add_done_callback(_track_status_id)
+                _track_cleanup_send_future(_fut)
             except Exception as _e:
                 logger.debug("status_callback error (%s): %s", event_type, _e)
 
@@ -14912,7 +14932,7 @@ class GatewayRunner:
                 if not _status_adapter or not _run_still_current():
                     return
                 try:
-                    asyncio.run_coroutine_threadsafe(
+                    _fut = asyncio.run_coroutine_threadsafe(
                         _status_adapter.send(
                             _status_chat_id,
                             message,
@@ -14920,6 +14940,7 @@ class GatewayRunner:
                         ),
                         _loop_for_step,
                     )
+                    _track_cleanup_send_future(_fut)
                 except Exception as _e:
                     logger.debug("background_review_callback error: %s", _e)
 
@@ -16024,19 +16045,34 @@ class GatewayRunner:
         if (
             _cleanup_progress
             and _cleanup_adapter is not None
-            and _cleanup_msg_ids
             and session_key
             and isinstance(response, dict)
             and not response.get("failed")
             and hasattr(_cleanup_adapter, "register_post_delivery_callback")
         ):
-            _ids_snapshot = list(_cleanup_msg_ids)
             _chat_id_snapshot = source.chat_id
             _adapter_snapshot = _cleanup_adapter
             _loop_snapshot = asyncio.get_running_loop()
+            _msg_ids_ref = _cleanup_msg_ids
+            _send_futures_ref = _cleanup_send_futures
 
             def _cleanup_temp_bubbles() -> None:
                 async def _delete_all() -> None:
+                    # Allow just-scheduled temporary sends (e.g. background
+                    # review/status messages released by an earlier chained
+                    # post-delivery callback) to resolve and contribute their
+                    # message ids before deletion.
+                    for _fut in list(_send_futures_ref):
+                        try:
+                            if getattr(_fut, "done", lambda: False)():
+                                _fut.result()
+                            else:
+                                await asyncio.wait_for(
+                                    asyncio.wrap_future(_fut), timeout=2.0
+                                )
+                        except Exception:
+                            pass
+                    _ids_snapshot = list(dict.fromkeys(_msg_ids_ref))
                     for _mid in _ids_snapshot:
                         try:
                             await _adapter_snapshot.delete_message(
