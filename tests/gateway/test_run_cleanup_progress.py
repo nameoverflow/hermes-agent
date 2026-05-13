@@ -131,6 +131,21 @@ class FailingAgent:
         }
 
 
+class BackgroundReviewAgent:
+    """Queues a deferred status/background-review message, then succeeds."""
+
+    def __init__(self, **kwargs):
+        self.tools = []
+        self.background_review_callback = None
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        cb = self.background_review_callback
+        if cb is not None:
+            cb("💾 Memory updated")
+            time.sleep(0.05)
+        return {"final_response": "done", "messages": [], "api_calls": 1}
+
+
 def _make_runner(adapter):
     gateway_run = importlib.import_module("gateway.run")
     GatewayRunner = gateway_run.GatewayRunner
@@ -154,7 +169,7 @@ def _make_runner(adapter):
     return runner
 
 
-def _install_fakes(monkeypatch, agent_cls, *, cleanup_on: bool):
+def _install_fakes(monkeypatch, agent_cls, *, cleanup_on: bool, platform_key: str = "telegram"):
     """Wire up the module stubs every _run_agent test needs."""
     monkeypatch.setenv("HERMES_TOOL_PROGRESS_MODE", "all")
 
@@ -175,7 +190,7 @@ def _install_fakes(monkeypatch, agent_cls, *, cleanup_on: bool):
     cfg = {
         "display": {
             "platforms": {
-                "telegram": {"cleanup_progress": True},
+                platform_key: {"cleanup_progress": True},
             }
         }
     } if cleanup_on else {}
@@ -365,3 +380,74 @@ async def test_cleanup_chains_with_existing_callback(monkeypatch, tmp_path):
     # deletes at least one progress bubble.
     assert pre_existing_fired == [True]
     assert len(adapter.deleted) >= 1
+
+
+@pytest.mark.asyncio
+async def test_discord_cleanup_enabled_by_default(monkeypatch, tmp_path):
+    """Discord opts into transient progress cleanup without user config."""
+    adapter = CleanupCaptureAdapter(platform=Platform.DISCORD)
+    runner = _make_runner(adapter)
+    gateway_run = _install_fakes(monkeypatch, ProgressAgent, cleanup_on=False)
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+
+    source = SessionSource(platform=Platform.DISCORD, chat_id="1234")
+    session_key = "agent:main:discord:channel:1234"
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-1",
+        session_key=session_key,
+    )
+
+    assert result["final_response"] == "done"
+    cb = adapter.pop_post_delivery_callback(session_key)
+    assert callable(cb)
+    cb()
+    for _ in range(20):
+        await asyncio.sleep(0.01)
+        if adapter.deleted:
+            break
+    assert len(adapter.deleted) >= 1, f"deleted={adapter.deleted} sent={adapter.sent}"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_deletes_deferred_background_review_message(monkeypatch, tmp_path):
+    """Cleanup waits for a post-delivery background/status send, then deletes it."""
+    adapter = CleanupCaptureAdapter(platform=Platform.DISCORD)
+    runner = _make_runner(adapter)
+    gateway_run = _install_fakes(monkeypatch, BackgroundReviewAgent, cleanup_on=False)
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+
+    source = SessionSource(platform=Platform.DISCORD, chat_id="1234")
+    session_key = "agent:main:discord:channel:1234"
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-1",
+        session_key=session_key,
+    )
+
+    assert result["final_response"] == "done"
+    cb = adapter.pop_post_delivery_callback(session_key)
+    assert callable(cb)
+    cb()
+    for _ in range(40):
+        await asyncio.sleep(0.01)
+        deleted_ids = {entry["message_id"] for entry in adapter.deleted}
+        bg_ids = {
+            entry["message_id"]
+            for entry in adapter.sent
+            if entry["content"] == "💾 Memory updated"
+        }
+        if bg_ids and bg_ids <= deleted_ids:
+            break
+
+    bg_messages = [entry for entry in adapter.sent if entry["content"] == "💾 Memory updated"]
+    assert len(bg_messages) == 1, adapter.sent
+    assert {bg_messages[0]["message_id"]} <= {entry["message_id"] for entry in adapter.deleted}

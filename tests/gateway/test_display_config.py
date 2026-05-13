@@ -344,14 +344,20 @@ class TestStreamingPerPlatform:
 # ---------------------------------------------------------------------------
 
 class TestCleanupProgress:
-    """``cleanup_progress`` is off by default and resolvable per-platform."""
+    """``cleanup_progress`` is resolvable per-platform."""
 
-    def test_default_off_for_all_platforms(self):
-        """No config set → cleanup_progress resolves to False everywhere."""
+    def test_default_off_for_most_platforms(self):
+        """No config set → cleanup_progress is opt-in except Discord."""
         from gateway.display_config import resolve_display_setting
 
-        for plat in ("telegram", "discord", "slack", "email"):
+        for plat in ("telegram", "slack", "email"):
             assert resolve_display_setting({}, plat, "cleanup_progress") is False
+
+    def test_default_on_for_discord(self):
+        """Discord cleans transient tool/background bubbles by default."""
+        from gateway.display_config import resolve_display_setting
+
+        assert resolve_display_setting({}, "discord", "cleanup_progress") is True
 
     def test_global_true_applies_to_all_platforms(self):
         """display.cleanup_progress=true opts in globally."""
