@@ -403,6 +403,11 @@ async def test_discord_cleanup_enabled_by_default(monkeypatch, tmp_path):
     )
 
     assert result["final_response"] == "done"
+    all_progress_text = "\n".join(call["content"] for call in adapter.sent)
+    all_progress_text += "\n".join(call["content"] for call in adapter.edits)
+    assert "pwd" not in all_progress_text
+    assert "ls" not in all_progress_text
+    assert 'terminal: "' not in all_progress_text
     cb = adapter.pop_post_delivery_callback(session_key)
     assert callable(cb)
     cb()
