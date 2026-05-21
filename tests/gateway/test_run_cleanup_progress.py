@@ -263,6 +263,17 @@ def _install_fakes(monkeypatch, agent_cls, *, cleanup_on: bool, platform_key: st
     return gateway_run
 
 
+async def _fire_post_delivery_callback(adapter, session_key, *, require: bool = False) -> None:
+    cb = adapter.pop_post_delivery_callback(session_key)
+    if require:
+        assert callable(cb)
+    if cb is None:
+        return
+    result = cb()
+    if hasattr(result, "__await__"):
+        await result
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -293,11 +304,10 @@ async def test_cleanup_off_by_default_leaves_bubbles(monkeypatch, tmp_path):
     # Even if an unrelated callback got registered (background-review
     # release lives in the same slot) firing it should never cause any
     # delete_message calls when cleanup is off.
-    cb = adapter.pop_post_delivery_callback(session_key)
-    if cb is not None:
-        cb()
-        for _ in range(10):
-            await asyncio.sleep(0.01)
+
+    await _fire_post_delivery_callback(adapter, session_key)
+    for _ in range(10):
+        await asyncio.sleep(0.01)
     assert adapter.deleted == []
 
 
@@ -323,14 +333,12 @@ async def test_cleanup_registers_callback_and_deletes_on_success(monkeypatch, tm
 
     assert result["final_response"] == "done"
     # The cleanup callback should be registered for this session.
-    cb = adapter.pop_post_delivery_callback(session_key)
-    assert callable(cb)
 
     # Fire it (base.py does this in _process_message_background's finally)
-    # and let the scheduled coroutine run to completion.
-    cb()
-    # delete_message is scheduled via run_coroutine_threadsafe → give the
-    # loop a couple of ticks to drain.
+    # and let the awaited cleanup coroutine run to completion.
+    await _fire_post_delivery_callback(adapter, session_key, require=True)
+    # The awaited cleanup usually deletes synchronously; keep a tiny drain
+    # loop for chained/background sends that may resolve on later ticks.
     for _ in range(20):
         await asyncio.sleep(0.01)
         if adapter.deleted:
@@ -365,11 +373,10 @@ async def test_cleanup_skipped_on_failed_run(monkeypatch, tmp_path):
     assert result.get("failed") is True
     # Whatever callback is registered should not trigger any deletion —
     # the cleanup callback is skipped on failed runs.
-    cb = adapter.pop_post_delivery_callback(session_key)
-    if cb is not None:
-        cb()
-        for _ in range(10):
-            await asyncio.sleep(0.01)
+
+    await _fire_post_delivery_callback(adapter, session_key)
+    for _ in range(10):
+        await asyncio.sleep(0.01)
     assert adapter.deleted == []
 
 
@@ -433,9 +440,8 @@ async def test_cleanup_chains_with_existing_callback(monkeypatch, tmp_path):
     )
 
     assert result["final_response"] == "done"
-    cb = adapter.pop_post_delivery_callback(session_key)
-    assert callable(cb)
-    cb()
+
+    await _fire_post_delivery_callback(adapter, session_key, require=True)
     for _ in range(20):
         await asyncio.sleep(0.01)
         if adapter.deleted:
@@ -473,9 +479,8 @@ async def test_discord_cleanup_enabled_by_default(monkeypatch, tmp_path):
     assert "pwd" not in all_progress_text
     assert "ls" not in all_progress_text
     assert 'terminal: "' not in all_progress_text
-    cb = adapter.pop_post_delivery_callback(session_key)
-    assert callable(cb)
-    cb()
+
+    await _fire_post_delivery_callback(adapter, session_key, require=True)
     for _ in range(20):
         await asyncio.sleep(0.01)
         if adapter.deleted:
@@ -523,9 +528,8 @@ async def test_discord_thread_progress_edits_and_cleanup_target_thread(monkeypat
     assert adapter.edits
     assert {entry["chat_id"] for entry in adapter.edits} == {"thread-123"}
 
-    cb = adapter.pop_post_delivery_callback(session_key)
-    assert callable(cb)
-    cb()
+
+    await _fire_post_delivery_callback(adapter, session_key, require=True)
     for _ in range(20):
         await asyncio.sleep(0.01)
         if adapter.deleted:
@@ -575,11 +579,10 @@ async def test_feishu_still_working_merges_into_progress_bubble(monkeypatch, tmp
     assert adapter.edits[-1]["content"] == "done"
     assert adapter.edits[-1]["finalize"] is True
     assert adapter.deleted == []
-    cb = adapter.pop_post_delivery_callback(session_key)
-    if cb is not None:
-        cb()
-        for _ in range(10):
-            await asyncio.sleep(0.01)
+
+    await _fire_post_delivery_callback(adapter, session_key)
+    for _ in range(10):
+        await asyncio.sleep(0.01)
     assert adapter.deleted == []
 
 
@@ -677,9 +680,8 @@ async def test_cleanup_deletes_deferred_background_review_message(monkeypatch, t
     )
 
     assert result["final_response"] == "done"
-    cb = adapter.pop_post_delivery_callback(session_key)
-    assert callable(cb)
-    cb()
+
+    await _fire_post_delivery_callback(adapter, session_key, require=True)
     for _ in range(40):
         await asyncio.sleep(0.01)
         deleted_ids = {entry["message_id"] for entry in adapter.deleted}

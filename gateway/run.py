@@ -16697,42 +16697,37 @@ class GatewayRunner:
         ):
             _chat_id_snapshot = _progress_target_chat_id
             _adapter_snapshot = _cleanup_adapter
-            _loop_snapshot = asyncio.get_running_loop()
             _msg_ids_ref = _cleanup_msg_ids
             _send_futures_ref = _cleanup_send_futures
 
-            def _cleanup_temp_bubbles() -> None:
-                async def _delete_all() -> None:
-                    # Allow just-scheduled temporary sends (e.g. background
-                    # review/status messages released by an earlier chained
-                    # post-delivery callback) to resolve and contribute their
-                    # message ids before deletion.
-                    for _fut in list(_send_futures_ref):
-                        try:
-                            if getattr(_fut, "done", lambda: False)():
-                                _fut.result()
-                            else:
-                                await asyncio.wait_for(
-                                    asyncio.wrap_future(_fut), timeout=2.0
-                                )
-                        except Exception:
-                            pass
-                    _ids_snapshot = list(dict.fromkeys(_msg_ids_ref))
-                    for _mid in _ids_snapshot:
-                        try:
-                            await _adapter_snapshot.delete_message(
-                                _chat_id_snapshot, _mid
+            async def _cleanup_temp_bubbles() -> None:
+                # Run deletion as an awaited post-delivery callback rather than
+                # fire-and-forget scheduling.  This keeps Discord/Telegram
+                # "Still working..." and tool-progress cleanup attached to the
+                # final-response lifecycle, so a gateway restart immediately
+                # after the final reply does not strand temporary bubbles.
+                # Allow just-scheduled temporary sends (e.g. background
+                # review/status messages released by an earlier chained
+                # post-delivery callback) to resolve and contribute their
+                # message ids before deletion.
+                for _fut in list(_send_futures_ref):
+                    try:
+                        if getattr(_fut, "done", lambda: False)():
+                            _fut.result()
+                        else:
+                            await asyncio.wait_for(
+                                asyncio.wrap_future(_fut), timeout=2.0
                             )
-                        except Exception:
-                            pass
-                try:
-                    safe_schedule_threadsafe(
-                        _delete_all(), _loop_snapshot,
-                        logger=logger,
-                        log_message="Temp bubble cleanup scheduling error",
-                    )
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
+                _ids_snapshot = list(dict.fromkeys(_msg_ids_ref))
+                for _mid in _ids_snapshot:
+                    try:
+                        await _adapter_snapshot.delete_message(
+                            _chat_id_snapshot, _mid
+                        )
+                    except Exception:
+                        pass
 
             try:
                 _cleanup_adapter.register_post_delivery_callback(
