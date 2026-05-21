@@ -4262,7 +4262,13 @@ class FeishuAdapter(BasePlatformAdapter):
         effective_reply_to = reply_to
         if not effective_reply_to and metadata and metadata.get("thread_id"):
             effective_reply_to = metadata.get("reply_to_message_id")
+        # Feishu only creates/continues a message thread when replies are sent
+        # with reply_in_thread=True. Existing thread/topic messages carry
+        # metadata.thread_id, but a top-level group @mention does not yet have a
+        # thread id; replying to it with reply_in_thread=True creates the thread.
         reply_in_thread = bool((metadata or {}).get("thread_id"))
+        if effective_reply_to and not reply_in_thread and not chat_id.startswith("ou_"):
+            reply_in_thread = True
         if effective_reply_to:
             body = self._build_reply_message_body(
                 content=payload,
