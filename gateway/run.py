@@ -14418,6 +14418,17 @@ class GatewayRunner:
             if source.platform == Platform.FEISHU and source.thread_id and event_message_id
             else None
         )
+        # Discord threads are addressable as their own channels.  We send
+        # progress/status bubbles to the thread via metadata={thread_id}, so
+        # subsequent edit/delete calls must target that same thread channel.
+        # Using the parent channel id makes Discord fetch_message() miss the
+        # bubble, which disables edits and leaves every "Still working..." /
+        # tool-progress bubble behind after the final response.
+        _progress_target_chat_id = (
+            str(_progress_thread_id)
+            if source.platform == Platform.DISCORD and _progress_thread_id
+            else source.chat_id
+        )
 
         async def send_progress_messages():
             if not progress_queue:
@@ -14521,7 +14532,7 @@ class GatewayRunner:
                         # Try to edit the existing progress message
                         full_text = "\n".join(progress_lines)
                         result = await adapter.edit_message(
-                            chat_id=source.chat_id,
+                            chat_id=_progress_target_chat_id,
                             message_id=progress_msg_id,
                             content=full_text,
                         )
@@ -14597,7 +14608,7 @@ class GatewayRunner:
                                     _pending_text = "\n".join(progress_lines)
                                     try:
                                         await adapter.edit_message(
-                                            chat_id=source.chat_id,
+                                            chat_id=_progress_target_chat_id,
                                             message_id=progress_msg_id,
                                             content=_pending_text,
                                         )
@@ -14619,7 +14630,7 @@ class GatewayRunner:
                         full_text = "\n".join(progress_lines)
                         try:
                             await adapter.edit_message(
-                                chat_id=source.chat_id,
+                                chat_id=_progress_target_chat_id,
                                 message_id=progress_msg_id,
                                 content=full_text,
                             )
@@ -16068,7 +16079,7 @@ class GatewayRunner:
             and not response.get("failed")
             and hasattr(_cleanup_adapter, "register_post_delivery_callback")
         ):
-            _chat_id_snapshot = source.chat_id
+            _chat_id_snapshot = _progress_target_chat_id
             _adapter_snapshot = _cleanup_adapter
             _loop_snapshot = asyncio.get_running_loop()
             _msg_ids_ref = _cleanup_msg_ids

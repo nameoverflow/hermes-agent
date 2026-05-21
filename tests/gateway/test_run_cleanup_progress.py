@@ -419,6 +419,57 @@ async def test_discord_cleanup_enabled_by_default(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_discord_thread_progress_edits_and_cleanup_target_thread(monkeypatch, tmp_path):
+    """Discord thread progress is sent via metadata, so edit/delete must use the thread id.
+
+    The parent channel cannot fetch messages that live inside a Discord thread.
+    If the gateway edits/deletes with the parent chat_id, real Discord rejects
+    the lookup; edits fall back to one permanent message per update and cleanup
+    never removes them.
+    """
+    adapter = CleanupCaptureAdapter(platform=Platform.DISCORD)
+    runner = _make_runner(adapter)
+    gateway_run = _install_fakes(monkeypatch, ProgressAgent, cleanup_on=False)
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+
+    source = SessionSource(
+        platform=Platform.DISCORD,
+        chat_id="parent-channel",
+        thread_id="thread-123",
+    )
+    session_key = "agent:main:discord:channel:thread-123"
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-1",
+        session_key=session_key,
+    )
+
+    assert result["final_response"] == "done"
+    # The first progress bubble is still sent via the parent + metadata so the
+    # adapter can route it to the thread in the normal Discord send path.
+    assert adapter.sent
+    assert adapter.sent[0]["chat_id"] == "parent-channel"
+    assert adapter.sent[0]["metadata"] == {"thread_id": "thread-123"}
+    # Follow-up progress edits must target the actual Discord thread channel.
+    assert adapter.edits
+    assert {entry["chat_id"] for entry in adapter.edits} == {"thread-123"}
+
+    cb = adapter.pop_post_delivery_callback(session_key)
+    assert callable(cb)
+    cb()
+    for _ in range(20):
+        await asyncio.sleep(0.01)
+        if adapter.deleted:
+            break
+    assert adapter.deleted
+    assert {entry["chat_id"] for entry in adapter.deleted} == {"thread-123"}
+
+
+@pytest.mark.asyncio
 async def test_cleanup_deletes_deferred_background_review_message(monkeypatch, tmp_path):
     """Cleanup waits for a post-delivery background/status send, then deletes it."""
     adapter = CleanupCaptureAdapter(platform=Platform.DISCORD)
