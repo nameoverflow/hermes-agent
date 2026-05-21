@@ -173,6 +173,20 @@ class TestYAMLNormalisation:
         config = {"display": {"platforms": {"slack": {"tool_preview_length": "80"}}}}
         assert resolve_display_setting(config, "slack", "tool_preview_length") == 80
 
+    def test_progress_history_latest_normalised(self):
+        """progress_history accepts latest/accumulate values."""
+        from gateway.display_config import resolve_display_setting
+
+        config = {"display": {"platforms": {"feishu": {"progress_history": "LATEST"}}}}
+        assert resolve_display_setting(config, "feishu", "progress_history") == "latest"
+
+    def test_progress_history_invalid_defaults_to_accumulate(self):
+        """Unknown progress_history values fall back to accumulate."""
+        from gateway.display_config import resolve_display_setting
+
+        config = {"display": {"platforms": {"feishu": {"progress_history": "weird"}}}}
+        assert resolve_display_setting(config, "feishu", "progress_history") == "accumulate"
+
     def test_platform_override_false_tool_progress(self):
         """Per-platform bare off → normalised."""
         from gateway.display_config import resolve_display_setting
@@ -234,6 +248,12 @@ class TestPlatformDefaults:
         from gateway.display_config import resolve_display_setting
 
         assert resolve_display_setting({}, "telegram", "streaming") is None
+
+    def test_progress_history_defaults_to_accumulate(self):
+        """By default, progress bubbles keep the historical accumulated view."""
+        from gateway.display_config import resolve_display_setting
+
+        assert resolve_display_setting({}, "feishu", "progress_history") == "accumulate"
 
 
 # ---------------------------------------------------------------------------
