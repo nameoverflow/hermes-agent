@@ -164,6 +164,26 @@ class BackgroundReviewAgent:
         return {"final_response": "done", "messages": [], "api_calls": 1}
 
 
+class FeishuBackgroundReviewProgressAgent:
+    """Emits tool progress and a background-review note during one Feishu turn."""
+
+    def __init__(self, **kwargs):
+        self.tool_progress_callback = kwargs.get("tool_progress_callback")
+        self.tools = []
+        self.background_review_callback = None
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        tool_cb = self.tool_progress_callback
+        if tool_cb is not None:
+            tool_cb("tool.started", "terminal", "pwd", {})
+        time.sleep(0.45)
+        bg_cb = self.background_review_callback
+        if bg_cb is not None:
+            bg_cb("💾 Memory updated")
+        time.sleep(0.45)
+        return {"final_response": "done", "messages": [], "api_calls": 1}
+
+
 class SlowProgressAgent:
     """Runs long enough for a still-working notice after one progress bubble."""
 
@@ -622,6 +642,48 @@ async def test_feishu_progress_stays_single_bubble_across_content_segments(monke
     assert adapter.edits[-1]["message_id"] == progress_mid
     assert adapter.edits[-1]["content"] == "done"
     assert adapter.edits[-1]["finalize"] is True
+    assert adapter.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_feishu_background_review_merges_into_progress_bubble(monkeypatch, tmp_path):
+    """Feishu background-review/status notes should share the progress bubble."""
+    adapter = CleanupCaptureAdapter(platform=Platform.FEISHU)
+    runner = _make_runner(adapter)
+    gateway_run = _install_fakes(
+        monkeypatch,
+        FeishuBackgroundReviewProgressAgent,
+        cleanup_on=True,
+        platform_key="feishu",
+    )
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+
+    source = SessionSource(platform=Platform.FEISHU, chat_id="oc_chat", chat_type="dm")
+    session_key = "agent:main:feishu:dm:oc_chat"
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-feishu-bg-review",
+        session_key=session_key,
+    )
+
+    assert result["final_response"] == "done"
+    assert result.get("already_sent") is True
+    # One temporary Feishu bubble is created, then both the background-review
+    # note and final answer edit that same message.  No post-delivery send means
+    # no extra recalled/deleted marker later.
+    assert len(adapter.sent) == 1, adapter.sent
+    progress_mid = adapter.sent[0]["message_id"]
+    progress_edits = [entry for entry in adapter.edits if entry["message_id"] == progress_mid]
+    assert any("💾 Memory updated" in entry["content"] for entry in progress_edits), adapter.edits
+    assert adapter.edits[-1]["message_id"] == progress_mid
+    assert adapter.edits[-1]["content"] == "done"
+    assert adapter.edits[-1]["finalize"] is True
+    assert adapter.deleted == []
+    await _fire_post_delivery_callback(adapter, session_key)
     assert adapter.deleted == []
 
 

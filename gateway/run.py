@@ -15151,8 +15151,26 @@ class GatewayRunner:
         else:
             _status_thread_metadata = self._thread_metadata_for_source(source, event_message_id) if _progress_thread_id else None
 
+        def _queue_feishu_transient_status(message: str) -> bool:
+            """Fold Feishu temporary/status notices into the single progress bubble.
+
+            Feishu deletion leaves visible recall tombstones.  When a progress
+            queue exists, status callbacks, background-review notes, and long-
+            running notices should all edit the same temporary bubble that can
+            later be reused as the final answer.
+            """
+            if source.platform != Platform.FEISHU or progress_queue is None:
+                return False
+            _text = str(message or "").strip()
+            if not _text:
+                return True
+            progress_queue.put(_text)
+            return True
+
         def _status_callback_sync(event_type: str, message: str) -> None:
             if not _status_adapter or not _run_still_current():
+                return
+            if _queue_feishu_transient_status(message):
                 return
             _fut = safe_schedule_threadsafe(
                 _status_adapter.send(
@@ -15420,6 +15438,8 @@ class GatewayRunner:
             def _deliver_bg_review_message(message: str) -> None:
                 if not _status_adapter or not _run_still_current():
                     return
+                if _queue_feishu_transient_status(message):
+                    return
                 _fut = safe_schedule_threadsafe(
                     _status_adapter.send(
                         _status_chat_id,
@@ -15443,6 +15463,8 @@ class GatewayRunner:
             # Background review delivery — send "💾 Memory updated" etc. to user
             def _bg_review_send(message: str) -> None:
                 if not _status_adapter or not _run_still_current():
+                    return
+                if _queue_feishu_transient_status(message):
                     return
                 if not _bg_review_release.is_set():
                     with _bg_review_pending_lock:
@@ -16128,8 +16150,7 @@ class GatewayRunner:
                 # instead of sending another temporary message that cleanup would
                 # later need to recall.  The progress worker owns send/edit and
                 # final single-bubble reuse for Feishu.
-                if source.platform == Platform.FEISHU and progress_queue is not None:
-                    progress_queue.put(_still_working_msg)
+                if source.platform == Platform.FEISHU and _queue_feishu_transient_status(_still_working_msg):
                     continue
                 try:
                     _notify_res = await _notify_adapter.send(
