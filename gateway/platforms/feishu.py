@@ -559,6 +559,156 @@ def _build_markdown_post_payload(content: str) -> str:
     )
 
 
+def _split_markdown_table_row(line: str) -> List[str]:
+    """Split a simple GitHub-flavoured markdown table row into cells."""
+    stripped = line.strip()
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|"):
+        stripped = stripped[:-1]
+
+    cells: List[str] = []
+    current: List[str] = []
+    escaped = False
+    for char in stripped:
+        if escaped:
+            current.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == "|":
+            cells.append("".join(current).strip())
+            current = []
+            continue
+        current.append(char)
+    cells.append("".join(current).strip())
+    return cells
+
+
+def _is_markdown_table_separator(line: str) -> bool:
+    cells = _split_markdown_table_row(line)
+    return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell.strip()) for cell in cells)
+
+
+def _plain_table_header(cell: str) -> str:
+    """Return a plain-text-ish header label for Feishu table display_name."""
+    label = cell.strip()
+    label = re.sub(r"^(\*\*|__)(.*)\1$", r"\2", label)
+    label = re.sub(r"^`(.*)`$", r"\1", label)
+    return label
+
+
+def _build_card_table_component(header_cells: List[str], rows: List[List[str]], *, table_index: int = 1) -> Dict[str, Any]:
+    """Build Feishu's JSON 2.0 native card table component from markdown table cells."""
+    columns: List[Dict[str, Any]] = []
+    for index, header_cell in enumerate(header_cells, start=1):
+        column: Dict[str, Any] = {
+            "name": f"col_{index}",
+            "display_name": _plain_table_header(header_cell),
+            "data_type": "lark_md",
+            "vertical_align": "top",
+            "horizontal_align": "left",
+        }
+        if index == 1:
+            column["width"] = "160px"
+        elif len(header_cells) >= 6:
+            column["width"] = "88px"
+        else:
+            column["width"] = "auto"
+        columns.append(column)
+
+    row_objects = [
+        {f"col_{index}": cell for index, cell in enumerate(row, start=1)}
+        for row in rows
+    ]
+    return {
+        "tag": "table",
+        "element_id": f"table_{table_index}",
+        "page_size": min(max(len(row_objects), 5), 10),
+        "row_height": "low",
+        "freeze_first_column": len(columns) >= 4,
+        "header_style": {
+            "text_align": "left",
+            "text_size": "normal",
+            "background_style": "none",
+            "text_color": "grey",
+            "bold": True,
+            "lines": 1,
+        },
+        "columns": columns,
+        "rows": row_objects,
+    }
+
+
+def _append_card_markdown_element(elements: List[Dict[str, Any]], lines: List[str]) -> None:
+    text = "\n".join(lines).strip()
+    if text:
+        elements.append({"tag": "markdown", "content": text})
+
+
+def _build_markdown_table_card_payload(content: str) -> str:
+    """Build a JSON 2.0 Feishu card for replies containing markdown tables.
+
+    Feishu post ``md`` elements do not render tables, while plain ``text`` leaks
+    raw ``|---|`` separators and markdown markers on mobile.  JSON 2.0 cards
+    support markdown blocks and a native ``table`` component, so table-like
+    replies can keep native prose/list/bold rendering and show actual table
+    widgets instead of squeezed card columns.
+    """
+    lines = content.replace("\r\n", "\n").split("\n")
+    elements: List[Dict[str, Any]] = []
+    prose: List[str] = []
+    index = 0
+    table_index = 1
+
+    while index < len(lines):
+        line = lines[index]
+        next_line = lines[index + 1] if index + 1 < len(lines) else ""
+        if line.strip().startswith("|") and next_line.strip().startswith("|") and _is_markdown_table_separator(next_line):
+            _append_card_markdown_element(elements, prose)
+            prose = []
+
+            header_cells = _split_markdown_table_row(line)
+            index += 2  # skip header + separator
+            table_rows: List[List[str]] = []
+            while index < len(lines) and lines[index].strip().startswith("|"):
+                row_cells = _split_markdown_table_row(lines[index])
+                if len(row_cells) < len(header_cells):
+                    row_cells.extend([""] * (len(header_cells) - len(row_cells)))
+                elif len(row_cells) > len(header_cells):
+                    row_cells = row_cells[: len(header_cells)]
+                table_rows.append(row_cells)
+                index += 1
+            elements.append(_build_card_table_component(header_cells, table_rows, table_index=table_index))
+            table_index += 1
+            continue
+
+        prose.append(line)
+        index += 1
+
+    _append_card_markdown_element(elements, prose)
+    return json.dumps(
+        {
+            "schema": "2.0",
+            "config": {
+                "update_multi": True,
+                "width_mode": "fill",
+                "summary": {"content": "Hermes"},
+            },
+            "header": {"title": {"tag": "plain_text", "content": "Hermes"}},
+            "body": {
+                "direction": "vertical",
+                "padding": "12px 8px 12px 8px",
+                "vertical_spacing": "8px",
+                "elements": elements or [{"tag": "markdown", "content": content}],
+            },
+        },
+        ensure_ascii=False,
+    )
+
+
 def _build_markdown_post_rows(content: str) -> List[List[Dict[str, str]]]:
     """Build Feishu post rows while isolating fenced code blocks.
 
@@ -2595,13 +2745,12 @@ class FeishuAdapter(BasePlatformAdapter):
 
         if P2CardActionTriggerResponse is None:
             return None
-        response = P2CardActionTriggerResponse()
-        if CallBackCard is not None:
-            card = CallBackCard()
-            card.type = "raw"
-            card.data = self._build_resolved_approval_card(choice=choice, user_name=user_name)
-            response.card = card
-        return response
+        # Return an empty 200 response to acknowledge the click. Updating the
+        # card inline from the synchronous callback is fragile across Feishu
+        # clients / SDK versions and can surface as an "approve failed" toast
+        # even when the background approval resolution was scheduled. Replace
+        # the original card asynchronously after the approval is resolved.
+        return P2CardActionTriggerResponse()
 
     def _handle_update_prompt_card_action(self, *, event: Any, action_value: Dict[str, Any], loop: Any) -> Any:
         """Schedule update prompt resolution and build the synchronous callback response."""
@@ -2630,13 +2779,30 @@ class FeishuAdapter(BasePlatformAdapter):
 
         if P2CardActionTriggerResponse is None:
             return None
-        response = P2CardActionTriggerResponse()
-        if CallBackCard is not None:
-            card = CallBackCard()
-            card.type = "raw"
-            card.data = self._build_resolved_update_prompt_card(answer=answer, user_name=user_name)
-            response.card = card
-        return response
+        return P2CardActionTriggerResponse()
+
+    async def _replace_interactive_card(self, *, message_id: str, card: Dict[str, Any], reason: str) -> None:
+        """Best-effort replacement of a sent interactive card.
+
+        Feishu card-action callbacks are synchronous and client-sensitive. We
+        acknowledge the click immediately, then update the original card via the
+        normal message update API so callback response shape issues cannot make
+        the user-facing approval click fail.
+        """
+        if not self._client or not message_id:
+            return
+        try:
+            body = self._build_update_message_body(
+                msg_type="interactive",
+                content=json.dumps(card, ensure_ascii=False),
+            )
+            request = self._build_update_message_request(message_id=message_id, request_body=body)
+            response = await asyncio.to_thread(self._client.im.v1.message.update, request)
+            result = self._finalize_send_result(response, f"{reason} card update failed")
+            if not result.success:
+                logger.warning("[Feishu] Failed to update %s card %s: %s", reason, message_id, result.error)
+        except Exception as exc:
+            logger.warning("[Feishu] Failed to update %s card %s: %s", reason, message_id, exc, exc_info=True)
 
     async def _resolve_approval(self, approval_id: Any, choice: str, user_name: str) -> None:
         """Pop approval state and unblock the waiting agent thread."""
@@ -2650,6 +2816,11 @@ class FeishuAdapter(BasePlatformAdapter):
             logger.info(
                 "Feishu button resolved %d approval(s) for session %s (choice=%s, user=%s)",
                 count, state["session_key"], choice, user_name,
+            )
+            await self._replace_interactive_card(
+                message_id=state.get("message_id") or "",
+                card=self._build_resolved_approval_card(choice=choice, user_name=user_name),
+                reason="approval",
             )
         except Exception as exc:
             logger.error("Failed to resolve gateway approval from Feishu button: %s", exc)
@@ -2665,6 +2836,11 @@ class FeishuAdapter(BasePlatformAdapter):
             logger.info(
                 "Feishu update prompt resolved for session %s (answer=%s, user=%s)",
                 state["session_key"], answer, user_name,
+            )
+            await self._replace_interactive_card(
+                message_id=state.get("message_id") or "",
+                card=self._build_resolved_update_prompt_card(answer=answer, user_name=user_name),
+                reason="update prompt",
             )
         except Exception as exc:
             logger.error("Failed to resolve Feishu update prompt: %s", exc)
@@ -4245,12 +4421,12 @@ class FeishuAdapter(BasePlatformAdapter):
     # =========================================================================
 
     def _build_outbound_payload(self, content: str) -> tuple[str, str]:
-        # Feishu post-type 'md' elements do not render markdown tables; sending
-        # table content as post causes the message to appear blank on the client.
-        # Force plain text for anything that looks like a markdown table.
+        # Feishu post-type 'md' elements do not render markdown tables, while
+        # plain text leaks raw `|---|` separators and markdown markers. Use an
+        # interactive JSON 2.0 card with Feishu's native table component for
+        # tabular content; prose around the tables remains markdown card content.
         if _MARKDOWN_TABLE_RE.search(content):
-            text_payload = {"text": content}
-            return "text", json.dumps(text_payload, ensure_ascii=False)
+            return "interactive", _build_markdown_table_card_payload(content)
         if _MARKDOWN_HINT_RE.search(content):
             return "post", _build_markdown_post_payload(content)
         text_payload = {"text": content}
@@ -4330,7 +4506,7 @@ class FeishuAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]],
     ) -> Any:
         effective_reply_to = reply_to
-        if not effective_reply_to and metadata and metadata.get("thread_id"):
+        if not effective_reply_to and metadata:
             effective_reply_to = metadata.get("reply_to_message_id")
         # Feishu only creates/continues a message thread when replies are sent
         # with reply_in_thread=True. Existing thread/topic messages carry

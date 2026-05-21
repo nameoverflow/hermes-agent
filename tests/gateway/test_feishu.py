@@ -1468,6 +1468,58 @@ class TestAdapterBehavior(unittest.TestCase):
         )
 
     @patch.dict(os.environ, {}, clear=True)
+    def test_approval_card_action_acknowledges_without_inline_card(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        scheduled = []
+
+        def fake_submit(_loop, coro):
+            scheduled.append(coro)
+            coro.close()
+            return True
+
+        adapter._submit_on_loop = fake_submit
+        adapter._get_cached_sender_name = Mock(return_value="Alice")
+        event = SimpleNamespace(operator=SimpleNamespace(open_id="ou_user"))
+
+        response = adapter._handle_approval_card_action(
+            event=event,
+            action_value={"approval_id": 1, "hermes_action": "approve_once"},
+            loop=object(),
+        )
+
+        self.assertIsNotNone(response)
+        self.assertIsNone(getattr(response, "card", None))
+        self.assertEqual(len(scheduled), 1)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_resolve_approval_replaces_card_asynchronously(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        adapter._approval_state[1] = {
+            "session_key": "agent:main:feishu:dm:oc_chat",
+            "message_id": "om_card",
+            "chat_id": "oc_chat",
+        }
+        adapter._replace_interactive_card = AsyncMock()
+
+        async def run():
+            with patch("tools.approval.resolve_gateway_approval", return_value=1):
+                await adapter._resolve_approval(1, "once", "Alice")
+
+        asyncio.run(run())
+
+        adapter._replace_interactive_card.assert_awaited_once()
+        kwargs = adapter._replace_interactive_card.await_args.kwargs
+        self.assertEqual(kwargs["message_id"], "om_card")
+        self.assertEqual(kwargs["reason"], "approval")
+        self.assertIn("Approved once", kwargs["card"]["header"]["title"]["content"])
+
+    @patch.dict(os.environ, {}, clear=True)
     def test_extract_text_message_starting_with_slash_becomes_command(self):
         from gateway.config import PlatformConfig
         from gateway.platforms.feishu import FeishuAdapter
@@ -2040,6 +2092,46 @@ class TestAdapterBehavior(unittest.TestCase):
 
         self.assertTrue(result.success)
         self.assertEqual(result.message_id, "om_reply")
+        self.assertTrue(captured["request"].request_body.reply_in_thread)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_send_group_metadata_reply_target_creates_feishu_thread(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        captured = {}
+
+        class _MessageAPI:
+            def reply(self, request):
+                captured["request"] = request
+                return SimpleNamespace(
+                    success=lambda: True,
+                    data=SimpleNamespace(message_id="om_reply"),
+                )
+
+            def create(self, request):
+                raise AssertionError("top-level group thread seed should use reply API, not create")
+
+        adapter._client = SimpleNamespace(
+            im=SimpleNamespace(v1=SimpleNamespace(message=_MessageAPI()))
+        )
+
+        async def _direct(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with patch("gateway.platforms.feishu.asyncio.to_thread", side_effect=_direct):
+            result = asyncio.run(
+                adapter.send(
+                    chat_id="oc_chat",
+                    content="hello",
+                    metadata={"reply_to_message_id": "om_top_level_group_message"},
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.message_id, "om_reply")
+        self.assertEqual(captured["request"].message_id, "om_top_level_group_message")
         self.assertTrue(captured["request"].request_body.reply_in_thread)
 
     @patch.dict(os.environ, {}, clear=True)
@@ -2622,6 +2714,86 @@ class TestAdapterBehavior(unittest.TestCase):
             rows,
             [[{"tag": "md", "text": "---\n1. 第一项\n  2. 子项\n- 外层\n  - 内层\n<u>下划线</u> 和 ~~删除线~~"}]],
         )
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_build_outbound_payload_uses_interactive_card_for_markdown_table(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        msg_type, payload = adapter._build_outbound_payload(
+            "时间范围： **昨天 2026-05-20**\n\n"
+            "| Ad set | 状态 | 收入 | ROI |\n"
+            "|---|---:|---:|---:|\n"
+            "| UK AD::All 25~64 Brand - C | ACTIVE | $32.07 | 53.2% |\n"
+            "| **合计** |  | **$38.12** | **-17.5%** |\n\n"
+            "**简要判断：**\n"
+            "- **明显赢家：** UK AD::All 25~64 Brand - C"
+        )
+
+        self.assertEqual(msg_type, "interactive")
+        card = json.loads(payload)
+        self.assertEqual(card["schema"], "2.0")
+        self.assertEqual(card["config"]["width_mode"], "fill")
+        self.assertTrue(card["config"]["update_multi"])
+        self.assertEqual(card["header"]["title"]["content"], "Hermes")
+        elements = card["body"]["elements"]
+        self.assertEqual(elements[0], {"tag": "markdown", "content": "时间范围： **昨天 2026-05-20**"})
+        table = elements[1]
+        self.assertEqual(table["tag"], "table")
+        self.assertTrue(table["freeze_first_column"])
+        self.assertEqual(table["page_size"], 5)
+        self.assertEqual([column["display_name"] for column in table["columns"]], ["Ad set", "状态", "收入", "ROI"])
+        self.assertEqual([column["data_type"] for column in table["columns"]], ["lark_md", "lark_md", "lark_md", "lark_md"])
+        self.assertEqual(
+            table["rows"][0],
+            {"col_1": "UK AD::All 25~64 Brand - C", "col_2": "ACTIVE", "col_3": "$32.07", "col_4": "53.2%"},
+        )
+        self.assertEqual(
+            table["rows"][1],
+            {"col_1": "**合计**", "col_2": "", "col_3": "**$38.12**", "col_4": "**-17.5%**"},
+        )
+        self.assertEqual(elements[2], {"tag": "markdown", "content": "**简要判断：**\n- **明显赢家：** UK AD::All 25~64 Brand - C"})
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_send_uses_interactive_card_for_markdown_table(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        captured = {}
+
+        class _MessageAPI:
+            def create(self, request):
+                captured["request"] = request
+                return SimpleNamespace(
+                    success=lambda: True,
+                    data=SimpleNamespace(message_id="om_table_card"),
+                )
+
+        adapter._client = SimpleNamespace(
+            im=SimpleNamespace(v1=SimpleNamespace(message=_MessageAPI()))
+        )
+
+        async def _direct(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with patch("gateway.platforms.feishu.asyncio.to_thread", side_effect=_direct):
+            result = asyncio.run(
+                adapter.send(
+                    chat_id="oc_chat",
+                    content="| A | B |\n|---|---:|\n| **x** | 1 |",
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(captured["request"].request_body.msg_type, "interactive")
+        card = json.loads(captured["request"].request_body.content)
+        self.assertEqual(card["schema"], "2.0")
+        table = card["body"]["elements"][0]
+        self.assertEqual(table["tag"], "table")
+        self.assertEqual(table["columns"][0]["display_name"], "A")
+        self.assertEqual(table["rows"][0], {"col_1": "**x**", "col_2": "1"})
 
     @patch.dict(os.environ, {}, clear=True)
     def test_send_uses_post_for_inline_markdown(self):

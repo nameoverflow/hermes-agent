@@ -58,8 +58,13 @@ class CleanupCaptureAdapter(BasePlatformAdapter):
         )
         return SendResult(success=True, message_id=mid)
 
-    async def edit_message(self, chat_id, message_id, content) -> SendResult:
-        self.edits.append({"chat_id": chat_id, "message_id": message_id, "content": content})
+    async def edit_message(self, chat_id, message_id, content, *, finalize: bool = False) -> SendResult:
+        self.edits.append({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "content": content,
+            "finalize": finalize,
+        })
         return SendResult(success=True, message_id=message_id)
 
     async def delete_message(self, chat_id, message_id) -> bool:
@@ -90,6 +95,19 @@ class NoDeleteAdapter(CleanupCaptureAdapter):
 
 # Re-bind so the class's delete_message identity equals the base's.
 NoDeleteAdapter.delete_message = BasePlatformAdapter.delete_message
+
+
+class FailingEditFeishuAdapter(CleanupCaptureAdapter):
+    """Feishu fake whose progress/final edits fail after the first send."""
+
+    async def edit_message(self, chat_id, message_id, content, *, finalize: bool = False) -> SendResult:
+        self.edits.append({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "content": content,
+            "finalize": finalize,
+        })
+        return SendResult(success=False, message_id=message_id, error="simulated update failed")
 
 
 class ProgressAgent:
@@ -143,6 +161,53 @@ class BackgroundReviewAgent:
         if cb is not None:
             cb("💾 Memory updated")
             time.sleep(0.05)
+        return {"final_response": "done", "messages": [], "api_calls": 1}
+
+
+class SlowProgressAgent:
+    """Runs long enough for a still-working notice after one progress bubble."""
+
+    def __init__(self, **kwargs):
+        self.tool_progress_callback = kwargs.get("tool_progress_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        cb = self.tool_progress_callback
+        if cb is not None:
+            cb("tool.started", "terminal", "pwd", {})
+        # The progress worker polls every ~0.3s; keep the fake run alive long
+        # enough for the first progress bubble to be sent before final reuse.
+        time.sleep(0.45)
+        return {"final_response": "done", "messages": [], "api_calls": 1}
+
+
+class FeishuProgressAcrossContentAgent:
+    """Emits progress, then visible content, then another progress event."""
+
+    def __init__(self, **kwargs):
+        self.tool_progress_callback = kwargs.get("tool_progress_callback")
+        self.stream_delta_callback = kwargs.get("stream_delta_callback")
+        self.interim_assistant_callback = kwargs.get("interim_assistant_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        cb = self.tool_progress_callback
+        if cb is not None:
+            cb("tool.started", "terminal", "pwd", {})
+        time.sleep(0.45)
+        stream_cb = getattr(self, "stream_delta_callback", None)
+        if stream_cb is not None:
+            stream_cb("Interim content before another tool.")
+        # Mark the streamed content segment as closed so the gateway's
+        # on_new_message hook fires. Feishu should keep using the original
+        # progress bubble instead of starting a second one after this marker.
+        interim_cb = getattr(self, "interim_assistant_callback", None)
+        if interim_cb is not None:
+            interim_cb("", already_streamed=True)
+        time.sleep(0.45)
+        if cb is not None:
+            cb("tool.started", "terminal", "ls", {})
+        time.sleep(0.45)
         return {"final_response": "done", "messages": [], "api_calls": 1}
 
 
@@ -467,6 +532,128 @@ async def test_discord_thread_progress_edits_and_cleanup_target_thread(monkeypat
             break
     assert adapter.deleted
     assert {entry["chat_id"] for entry in adapter.deleted} == {"thread-123"}
+
+
+@pytest.mark.asyncio
+async def test_feishu_still_working_merges_into_progress_bubble(monkeypatch, tmp_path):
+    """Feishu should not send a separate Still working bubble that later recalls.
+
+    With tool progress enabled, the long-running notice is queued into the same
+    editable progress bubble.  The single Feishu progress message can then be
+    reused for the final answer instead of being deleted.
+    """
+    adapter = CleanupCaptureAdapter(platform=Platform.FEISHU)
+    runner = _make_runner(adapter)
+    gateway_run = _install_fakes(
+        monkeypatch,
+        SlowProgressAgent,
+        cleanup_on=True,
+        platform_key="feishu",
+    )
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setenv("HERMES_AGENT_NOTIFY_INTERVAL", "0.05")
+
+    source = SessionSource(platform=Platform.FEISHU, chat_id="oc_chat", chat_type="dm")
+    session_key = "agent:main:feishu:dm:oc_chat"
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-feishu",
+        session_key=session_key,
+    )
+
+    assert result["final_response"] == "done"
+    assert result.get("already_sent") is True
+    # Only the original progress bubble is sent. The still-working notice and
+    # final answer both arrive as edits to that same message.
+    assert len(adapter.sent) == 1, adapter.sent
+    assert adapter.sent[0]["content"].startswith("💻 terminal")
+    assert any("Still working" in entry["content"] for entry in adapter.edits), adapter.edits
+    assert adapter.edits[-1]["content"] == "done"
+    assert adapter.edits[-1]["finalize"] is True
+    assert adapter.deleted == []
+    cb = adapter.pop_post_delivery_callback(session_key)
+    if cb is not None:
+        cb()
+        for _ in range(10):
+            await asyncio.sleep(0.01)
+    assert adapter.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_feishu_progress_stays_single_bubble_across_content_segments(monkeypatch, tmp_path):
+    """Feishu keeps one editable tool-progress bubble across content resets."""
+    adapter = CleanupCaptureAdapter(platform=Platform.FEISHU)
+    runner = _make_runner(adapter)
+    gateway_run = _install_fakes(
+        monkeypatch,
+        FeishuProgressAcrossContentAgent,
+        cleanup_on=True,
+        platform_key="feishu",
+    )
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+
+    source = SessionSource(platform=Platform.FEISHU, chat_id="oc_chat", chat_type="dm")
+    session_key = "agent:main:feishu:dm:oc_chat"
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-feishu-content",
+        session_key=session_key,
+    )
+
+    assert result["final_response"] == "done"
+    assert result.get("already_sent") is True
+    progress_sends = [entry for entry in adapter.sent if entry["content"].startswith("💻 terminal")]
+    assert len(progress_sends) == 1, adapter.sent
+    progress_mid = progress_sends[0]["message_id"]
+    progress_edits = [entry for entry in adapter.edits if entry["message_id"] == progress_mid]
+    assert progress_edits, adapter.edits
+    assert any('terminal: "ls"' in entry["content"] for entry in progress_edits), adapter.edits
+    assert adapter.edits[-1]["message_id"] == progress_mid
+    assert adapter.edits[-1]["content"] == "done"
+    assert adapter.edits[-1]["finalize"] is True
+    assert adapter.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_feishu_progress_edit_failure_does_not_spawn_more_tool_bubbles(monkeypatch, tmp_path):
+    """If Feishu message.update rejects an edit, don't fall back to tool sends."""
+    adapter = FailingEditFeishuAdapter(platform=Platform.FEISHU)
+    runner = _make_runner(adapter)
+    gateway_run = _install_fakes(
+        monkeypatch,
+        FeishuProgressAcrossContentAgent,
+        cleanup_on=True,
+        platform_key="feishu",
+    )
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+
+    source = SessionSource(platform=Platform.FEISHU, chat_id="oc_chat", chat_type="dm")
+    session_key = "agent:main:feishu:dm:oc_chat"
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-feishu-edit-fail",
+        session_key=session_key,
+    )
+
+    assert result["final_response"] == "done"
+    assert not result.get("already_sent")
+    progress_sends = [entry for entry in adapter.sent if entry["content"].startswith("💻 terminal")]
+    assert len(progress_sends) == 1, adapter.sent
+    assert all('terminal: "ls"' not in entry["content"] for entry in adapter.sent), adapter.sent
+    assert adapter.edits, "edit failures should be attempted, not replaced by sends"
+    assert adapter.deleted == []
 
 
 @pytest.mark.asyncio
