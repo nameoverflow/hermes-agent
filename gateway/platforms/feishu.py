@@ -2290,26 +2290,22 @@ class FeishuAdapter(BasePlatformAdapter):
                     override_error="Feishu image upload missing image_key",
                 )
 
-            if caption:
-                post_payload = self._build_media_post_payload(
-                    caption=caption,
-                    media_tag={"tag": "img", "image_key": image_key},
-                )
-                message_response = await self._feishu_send_with_retry(
-                    chat_id=chat_id,
-                    msg_type="post",
-                    payload=post_payload,
-                    reply_to=reply_to,
-                    metadata=metadata,
-                )
-            else:
-                message_response = await self._feishu_send_with_retry(
-                    chat_id=chat_id,
-                    msg_type="image",
-                    payload=json.dumps({"image_key": image_key}, ensure_ascii=False),
-                    reply_to=reply_to,
-                    metadata=metadata,
-                )
+            # Feishu's native ``image`` message type is accepted for some
+            # top-level sends but is rejected by thread replies with the opaque
+            # ``99992402 field validation failed`` error.  Sending the image as
+            # a post element works for both top-level messages and
+            # reply_in_thread=True, so use the post path consistently.
+            post_payload = self._build_media_post_payload(
+                caption=caption or "",
+                media_tag={"tag": "img", "image_key": image_key},
+            )
+            message_response = await self._feishu_send_with_retry(
+                chat_id=chat_id,
+                msg_type="post",
+                payload=post_payload,
+                reply_to=reply_to,
+                metadata=metadata,
+            )
             return self._finalize_send_result(message_response, "image send failed")
         except Exception as exc:
             logger.error("[Feishu] Failed to send image %s: %s", image_path, exc, exc_info=True)
@@ -4908,8 +4904,12 @@ class FeishuAdapter(BasePlatformAdapter):
         return _build_markdown_post_payload(content)
 
     def _build_media_post_payload(self, *, caption: str, media_tag: Dict[str, str]) -> str:
-        payload = json.loads(self._build_post_payload(caption))
-        content = payload.setdefault("zh_cn", {}).setdefault("content", [])
+        if caption:
+            payload = json.loads(self._build_post_payload(caption))
+            content = payload.setdefault("zh_cn", {}).setdefault("content", [])
+        else:
+            payload = {"zh_cn": {"content": []}}
+            content = payload["zh_cn"]["content"]
         content.append([media_tag])
         return json.dumps(payload, ensure_ascii=False)
 

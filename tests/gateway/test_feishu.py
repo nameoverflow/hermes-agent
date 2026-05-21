@@ -2460,7 +2460,7 @@ class TestAdapterBehavior(unittest.TestCase):
         self.assertIn("报告请看", captured["message_request"].request_body.content)
 
     @patch.dict(os.environ, {}, clear=True)
-    def test_send_image_file_uploads_image_and_sends_image_message(self):
+    def test_send_image_file_uploads_image_and_sends_post_image_message(self):
         from gateway.config import PlatformConfig
         from gateway.platforms.feishu import FeishuAdapter
 
@@ -2508,10 +2508,66 @@ class TestAdapterBehavior(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.message_id, "om_image_msg")
         self.assertEqual(captured["upload_request"].request_body.image_type, "message")
-        self.assertEqual(
-            captured["message_request"].request_body.content,
-            '{"image_key": "img_123"}',
+        self.assertEqual(captured["message_request"].request_body.msg_type, "post")
+        self.assertIn('"tag": "img"', captured["message_request"].request_body.content)
+        self.assertIn('"image_key": "img_123"', captured["message_request"].request_body.content)
+        self.assertNotIn('"tag": "md", "text": ""', captured["message_request"].request_body.content)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_send_image_file_reply_uses_post_and_thread_flag(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        captured = {}
+
+        class _ImageAPI:
+            def create(self, request):
+                return SimpleNamespace(
+                    success=lambda: True,
+                    data=SimpleNamespace(image_key="img_123"),
+                )
+
+        class _MessageAPI:
+            def reply(self, request):
+                captured["message_request"] = request
+                return SimpleNamespace(
+                    success=lambda: True,
+                    data=SimpleNamespace(message_id="om_image_reply"),
+                )
+
+        adapter._client = SimpleNamespace(
+            im=SimpleNamespace(
+                v1=SimpleNamespace(
+                    image=_ImageAPI(),
+                    message=_MessageAPI(),
+                )
+            )
         )
+
+        async def _direct(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with tempfile.NamedTemporaryFile("wb", suffix=".png", delete=False) as tmp:
+            tmp.write(b"\x89PNG\r\n\x1a\n")
+            image_path = tmp.name
+
+        try:
+            with patch("gateway.platforms.feishu.asyncio.to_thread", side_effect=_direct):
+                result = asyncio.run(
+                    adapter.send_image_file(
+                        chat_id="oc_chat",
+                        image_path=image_path,
+                        metadata={"thread_id": "omt-thread", "reply_to_message_id": "om_parent"},
+                    )
+                )
+        finally:
+            os.unlink(image_path)
+
+        self.assertTrue(result.success)
+        self.assertEqual(captured["message_request"].request_body.msg_type, "post")
+        self.assertTrue(captured["message_request"].request_body.reply_in_thread)
+        self.assertIn('"tag": "img"', captured["message_request"].request_body.content)
 
     @patch.dict(os.environ, {}, clear=True)
     def test_send_image_file_with_caption_uses_single_post_message(self):
