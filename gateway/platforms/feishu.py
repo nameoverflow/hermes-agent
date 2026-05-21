@@ -3940,6 +3940,8 @@ class FeishuAdapter(BasePlatformAdapter):
         if normalized.text_content:
             return normalized.text_content
         placeholder = normalized.metadata.get("placeholder_text") if isinstance(normalized.metadata, dict) else None
+        if placeholder is None:
+            return None
         return str(placeholder).strip() or None
 
     @staticmethod

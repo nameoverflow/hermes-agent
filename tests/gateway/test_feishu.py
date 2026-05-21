@@ -1454,6 +1454,20 @@ class TestAdapterBehavior(unittest.TestCase):
         self.assertEqual(attachment, "[Attachment: report.pdf]")
 
     @patch.dict(os.environ, {}, clear=True)
+    def test_extract_text_from_raw_content_returns_none_without_text_or_placeholder(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+
+        self.assertIsNone(
+            adapter._extract_text_from_raw_content(
+                msg_type="image",
+                raw_content='{"image_key":"img_1"}',
+            )
+        )
+
+    @patch.dict(os.environ, {}, clear=True)
     def test_extract_text_message_starting_with_slash_becomes_command(self):
         from gateway.config import PlatformConfig
         from gateway.platforms.feishu import FeishuAdapter
