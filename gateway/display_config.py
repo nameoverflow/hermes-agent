@@ -41,6 +41,10 @@ _GLOBAL_DEFAULTS: dict[str, Any] = {
     # live, just cleaned up after success so the chat doesn't fill up with
     # stale breadcrumbs. Failed runs leave bubbles in place as breadcrumbs.
     "cleanup_progress": False,
+    # How tool-progress lines are rendered inside the temporary progress bubble:
+    # "accumulate" keeps a short history, "latest" edits the bubble to only
+    # show the most recent tool call.
+    "progress_history": "accumulate",
 }
 
 # ---------------------------------------------------------------------------
@@ -198,6 +202,9 @@ def _normalise(setting: str, value: Any) -> Any:
         if isinstance(value, str):
             return value.lower() in {"true", "1", "yes", "on"}
         return bool(value)
+    if setting == "progress_history":
+        val = str(value).lower().strip()
+        return val if val in {"accumulate", "latest"} else "accumulate"
     if setting == "tool_preview_length":
         try:
             return int(value)

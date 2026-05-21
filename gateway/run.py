@@ -14247,6 +14247,11 @@ class GatewayRunner:
             _cleanup_adapter = None
         _cleanup_msg_ids: List[str] = []
         _cleanup_send_futures: List[Any] = []
+        _progress_history_mode = str(
+            resolve_display_setting(user_config, platform_key, "progress_history", "accumulate")
+            or "accumulate"
+        ).lower()
+        _progress_latest_only = _progress_history_mode == "latest"
 
         def _track_cleanup_send_future(fut: Any) -> None:
             """Track the SendResult from a temporary bubble for later deletion.
@@ -14472,6 +14477,8 @@ class GatewayRunner:
                         _, base_msg, count = raw
                         if progress_lines:
                             progress_lines[-1] = f"{base_msg} (×{count + 1})"
+                        else:
+                            progress_lines = [f"{base_msg} (×{count + 1})"] if _progress_latest_only else []
                         msg = progress_lines[-1] if progress_lines else base_msg
                     elif isinstance(raw, tuple) and len(raw) >= 1 and raw[0] == "__reset__":
                         # Content bubble just landed on the platform — close off
@@ -14489,7 +14496,10 @@ class GatewayRunner:
                         continue
                     else:
                         msg = raw
-                        progress_lines.append(msg)
+                        if _progress_latest_only:
+                            progress_lines = [msg]
+                        else:
+                            progress_lines.append(msg)
 
                     # Throttle edits: batch rapid tool updates into fewer
                     # API calls to avoid hitting Telegram flood control.
@@ -14598,7 +14608,10 @@ class GatewayRunner:
                                 last_progress_msg[0] = None
                                 repeat_count[0] = 0
                             else:
-                                progress_lines.append(raw)
+                                if _progress_latest_only:
+                                    progress_lines = [raw]
+                                else:
+                                    progress_lines.append(raw)
                         except Exception:
                             break
                     # Final edit with all remaining tools (only if editing works)
