@@ -14925,13 +14925,13 @@ class GatewayRunner:
                         # order. Mirrors GatewayStreamConsumer.on_segment_break
                         # on the content side. (Issue: tool + content
                         # linearization regression after PR #7885.)
-                        if source.platform == Platform.FEISHU:
+                        if source.platform in {Platform.FEISHU, Platform.DISCORD}:
                             # Feishu bot deletes leave permanent "message
-                            # recalled" tombstones, so keep tool progress on a
-                            # single editable bubble for the whole turn.  The
-                            # final-response reuse path below can only replace
-                            # the progress bubble in-place when there is a
-                            # single tracked message id.
+                            # recalled" tombstones; Discord can delete, but the
+                            # desired gateway UX is still one editable progress
+                            # bubble per turn. Keep tool progress on a single
+                            # message so the final-response reuse path below can
+                            # replace it in-place when there is one tracked id.
                             continue
                         progress_msg_id = None
                         progress_lines = []
@@ -14971,18 +14971,21 @@ class GatewayRunner:
                         )
                         if not result.success:
                             _err = (getattr(result, "error", "") or "").lower()
-                            if source.platform == Platform.FEISHU:
+                            if source.platform in {Platform.FEISHU, Platform.DISCORD}:
                                 # Feishu update_message can become unavailable
                                 # for reasons outside our control (age/window,
                                 # validation quirks, transient API failures).
-                                # Falling back to ``send`` here recreates the
-                                # exact UX we are avoiding: one permanent tool
-                                # bubble per later tool call.  Keep the single
-                                # existing bubble and retry future edits; the
-                                # final-send path below will still deliver the
-                                # real answer if final reuse cannot edit it.
+                                # Discord edits can fail too (deleted message,
+                                # permissions, transient API errors). Falling
+                                # back to ``send`` here recreates the exact UX we
+                                # are avoiding: one permanent tool/status bubble
+                                # per later update. Keep the single existing
+                                # bubble and retry future edits; the final-send
+                                # path below will still deliver the answer if
+                                # final reuse cannot edit it.
                                 logger.debug(
-                                    "[Feishu] Progress edit failed for %s; suppressing extra progress send: %s",
+                                    "[%s] Progress edit failed for %s; suppressing extra progress send: %s",
+                                    source.platform.value,
                                     progress_msg_id,
                                     getattr(result, "error", None),
                                 )
@@ -15053,7 +15056,7 @@ class GatewayRunner:
                                 # Content-bubble marker during drain: close off
                                 # the current progress bubble and start a fresh
                                 # one for any tool lines that arrived after.
-                                if source.platform == Platform.FEISHU:
+                                if source.platform in {Platform.FEISHU, Platform.DISCORD}:
                                     continue
                                 if can_edit and progress_lines and progress_msg_id:
                                     _pending_text = "\n".join(progress_lines)
@@ -15151,15 +15154,17 @@ class GatewayRunner:
         else:
             _status_thread_metadata = self._thread_metadata_for_source(source, event_message_id) if _progress_thread_id else None
 
-        def _queue_feishu_transient_status(message: str) -> bool:
-            """Fold Feishu temporary/status notices into the single progress bubble.
+        def _queue_shared_progress_transient_status(message: str) -> bool:
+            """Fold platform transient/status notices into one progress bubble.
 
-            Feishu deletion leaves visible recall tombstones.  When a progress
-            queue exists, status callbacks, background-review notes, and long-
-            running notices should all edit the same temporary bubble that can
-            later be reused as the final answer.
+            Feishu deletion leaves visible recall tombstones, and Discord UX is
+            cleaner when final answers replace the temporary progress bubble
+            instead of leaving then deleting tool/status clutter.  When a
+            progress queue exists, status callbacks, background-review notes,
+            and long-running notices should all edit the same temporary bubble
+            that can later be reused as the final answer.
             """
-            if source.platform != Platform.FEISHU or progress_queue is None:
+            if source.platform not in {Platform.FEISHU, Platform.DISCORD} or progress_queue is None:
                 return False
             _text = str(message or "").strip()
             if not _text:
@@ -15170,7 +15175,7 @@ class GatewayRunner:
         def _status_callback_sync(event_type: str, message: str) -> None:
             if not _status_adapter or not _run_still_current():
                 return
-            if _queue_feishu_transient_status(message):
+            if _queue_shared_progress_transient_status(message):
                 return
             _fut = safe_schedule_threadsafe(
                 _status_adapter.send(
@@ -15313,7 +15318,7 @@ class GatewayRunner:
                             on_new_message=(
                                 (
                                     lambda: progress_queue.put(("__reset__",))
-                                    if source.platform != Platform.FEISHU
+                                    if source.platform not in {Platform.FEISHU, Platform.DISCORD}
                                     else None
                                 )
                                 if progress_queue is not None
@@ -15438,7 +15443,7 @@ class GatewayRunner:
             def _deliver_bg_review_message(message: str) -> None:
                 if not _status_adapter or not _run_still_current():
                     return
-                if _queue_feishu_transient_status(message):
+                if _queue_shared_progress_transient_status(message):
                     return
                 _fut = safe_schedule_threadsafe(
                     _status_adapter.send(
@@ -15464,7 +15469,7 @@ class GatewayRunner:
             def _bg_review_send(message: str) -> None:
                 if not _status_adapter or not _run_still_current():
                     return
-                if _queue_feishu_transient_status(message):
+                if _queue_shared_progress_transient_status(message):
                     return
                 if not _bg_review_release.is_set():
                     with _bg_review_pending_lock:
@@ -16145,12 +16150,12 @@ class GatewayRunner:
                         pass
                 _still_working_msg = f"⏳ Still working... ({_elapsed_mins} min elapsed{_status_detail})"
                 # Feishu leaves a permanent "message recalled" tombstone when
-                # temporary messages are deleted.  If tool progress is enabled,
-                # fold long-running notices into that editable progress bubble
-                # instead of sending another temporary message that cleanup would
-                # later need to recall.  The progress worker owns send/edit and
-                # final single-bubble reuse for Feishu.
-                if source.platform == Platform.FEISHU and _queue_feishu_transient_status(_still_working_msg):
+                # temporary messages are deleted; Discord is also cleaner when
+                # the long-running notice edits the existing progress bubble and
+                # is replaced by the final answer in-place.  If tool progress is
+                # enabled, fold these notices into that editable progress bubble
+                # instead of sending another temporary message.
+                if _queue_shared_progress_transient_status(_still_working_msg):
                     continue
                 try:
                     _notify_res = await _notify_adapter.send(
@@ -16655,16 +16660,18 @@ class GatewayRunner:
                 response["already_sent"] = True
 
         # Feishu shows a persistent "message recalled" marker for bot deletes,
-        # so deleting the single temporary tool-progress bubble is visually
-        # worse than keeping it.  When there is exactly one tracked progress
-        # message, reuse it as the final answer by editing it in-place and mark
-        # the turn as already delivered.  If the edit fails (e.g. oversized
-        # content), fall back to the normal final-send path but still keep the
-        # progress bubble instead of recalling it.
+        # and Discord users benefit from the same single-bubble lifecycle: the
+        # temporary progress/status bubble becomes the final answer instead of
+        # lingering briefly and then disappearing.  When there is exactly one
+        # tracked progress message, reuse it as the final answer by editing it
+        # in-place and mark the turn as already delivered.  If the edit fails
+        # (e.g. oversized content), fall back to the normal final-send path.  For
+        # Feishu, still keep the stale progress bubble to avoid a recall marker;
+        # for Discord, leave the id tracked so post-delivery cleanup deletes it.
         if (
             _cleanup_progress
             and _cleanup_adapter is not None
-            and source.platform == Platform.FEISHU
+            and source.platform in {Platform.FEISHU, Platform.DISCORD}
             and isinstance(response, dict)
             and not response.get("failed")
             and not response.get("already_sent")
@@ -16673,6 +16680,7 @@ class GatewayRunner:
             _final_text = str(response.get("final_response") or "").strip()
             if len(_ids_snapshot) == 1 and _final_text and _final_text != "(empty)":
                 _reuse_mid = _ids_snapshot[0]
+                _reuse_succeeded = False
                 try:
                     _reuse_result = await _cleanup_adapter.edit_message(
                         chat_id=_progress_target_chat_id,
@@ -16682,26 +16690,32 @@ class GatewayRunner:
                     )
                     if getattr(_reuse_result, "success", False):
                         response["already_sent"] = True
+                        _reuse_succeeded = True
                     else:
                         logger.debug(
-                            "[Feishu] Progress bubble final reuse failed for %s: %s",
+                            "[%s] Progress bubble final reuse failed for %s: %s",
+                            source.platform.value,
                             _reuse_mid,
                             getattr(_reuse_result, "error", None),
                         )
                 except Exception as _reuse_exc:
                     logger.debug(
-                        "[Feishu] Progress bubble final reuse raised for %s: %s",
+                        "[%s] Progress bubble final reuse raised for %s: %s",
+                        source.platform.value,
                         _reuse_mid,
                         _reuse_exc,
                     )
                 finally:
-                    # Whether or not the edit succeeded, do not delete this
-                    # Feishu message: delete leaves an unavoidable recalled
-                    # marker in the conversation history.
-                    _cleanup_msg_ids[:] = [
-                        _mid for _mid in _cleanup_msg_ids
-                        if str(_mid) != str(_reuse_mid)
-                    ]
+                    if _reuse_succeeded or source.platform == Platform.FEISHU:
+                        # A successful reuse must not be deleted because it is
+                        # now the final answer.  Feishu also keeps failed reuse
+                        # bubbles to avoid unavoidable recalled-message markers;
+                        # Discord failed reuses stay tracked for cleanup after
+                        # the normal final-send path delivers the answer.
+                        _cleanup_msg_ids[:] = [
+                            _mid for _mid in _cleanup_msg_ids
+                            if str(_mid) != str(_reuse_mid)
+                        ]
 
         # Schedule deletion of tracked temporary progress bubbles after the
         # final response lands. Failed runs skip this so bubbles remain as

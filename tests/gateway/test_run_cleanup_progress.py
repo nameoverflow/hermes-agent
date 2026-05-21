@@ -164,8 +164,8 @@ class BackgroundReviewAgent:
         return {"final_response": "done", "messages": [], "api_calls": 1}
 
 
-class FeishuBackgroundReviewProgressAgent:
-    """Emits tool progress and a background-review note during one Feishu turn."""
+class SharedBackgroundReviewProgressAgent:
+    """Emits tool progress and a background-review note during one gateway turn."""
 
     def __init__(self, **kwargs):
         self.tool_progress_callback = kwargs.get("tool_progress_callback")
@@ -201,7 +201,7 @@ class SlowProgressAgent:
         return {"final_response": "done", "messages": [], "api_calls": 1}
 
 
-class FeishuProgressAcrossContentAgent:
+class SharedProgressAcrossContentAgent:
     """Emits progress, then visible content, then another progress event."""
 
     def __init__(self, **kwargs):
@@ -494,18 +494,25 @@ async def test_discord_cleanup_enabled_by_default(monkeypatch, tmp_path):
     )
 
     assert result["final_response"] == "done"
+    assert result.get("already_sent") is True
     all_progress_text = "\n".join(call["content"] for call in adapter.sent)
     all_progress_text += "\n".join(call["content"] for call in adapter.edits)
     assert "pwd" not in all_progress_text
     assert "ls" not in all_progress_text
     assert 'terminal: "' not in all_progress_text
 
+    # Discord now follows the single-bubble path too: one temporary progress
+    # message is edited into the final answer, so cleanup has nothing to delete.
+    assert len(adapter.sent) == 1, adapter.sent
+    progress_mid = adapter.sent[0]["message_id"]
+    assert adapter.edits[-1]["message_id"] == progress_mid
+    assert adapter.edits[-1]["content"] == "done"
+    assert adapter.edits[-1]["finalize"] is True
+
     await _fire_post_delivery_callback(adapter, session_key, require=True)
-    for _ in range(20):
+    for _ in range(10):
         await asyncio.sleep(0.01)
-        if adapter.deleted:
-            break
-    assert len(adapter.deleted) >= 1, f"deleted={adapter.deleted} sent={adapter.sent}"
+    assert adapter.deleted == []
 
 
 @pytest.mark.asyncio
@@ -539,23 +546,104 @@ async def test_discord_thread_progress_edits_and_cleanup_target_thread(monkeypat
     )
 
     assert result["final_response"] == "done"
+    assert result.get("already_sent") is True
     # The first progress bubble is still sent via the parent + metadata so the
     # adapter can route it to the thread in the normal Discord send path.
     assert adapter.sent
+    assert len(adapter.sent) == 1, adapter.sent
+    progress_mid = adapter.sent[0]["message_id"]
     assert adapter.sent[0]["chat_id"] == "parent-channel"
     assert adapter.sent[0]["metadata"] == {"thread_id": "thread-123"}
-    # Follow-up progress edits must target the actual Discord thread channel.
+    # Follow-up progress edits and final reuse must target the actual Discord
+    # thread channel. The final answer remains in the reused progress message,
+    # so there should be no post-delivery delete.
     assert adapter.edits
     assert {entry["chat_id"] for entry in adapter.edits} == {"thread-123"}
-
+    assert adapter.edits[-1]["message_id"] == progress_mid
+    assert adapter.edits[-1]["content"] == "done"
+    assert adapter.edits[-1]["finalize"] is True
 
     await _fire_post_delivery_callback(adapter, session_key, require=True)
-    for _ in range(20):
+    for _ in range(10):
         await asyncio.sleep(0.01)
-        if adapter.deleted:
-            break
-    assert adapter.deleted
-    assert {entry["chat_id"] for entry in adapter.deleted} == {"thread-123"}
+    assert adapter.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_discord_still_working_merges_into_progress_bubble(monkeypatch, tmp_path):
+    """Discord should not send a separate Still working bubble either."""
+    adapter = CleanupCaptureAdapter(platform=Platform.DISCORD)
+    runner = _make_runner(adapter)
+    gateway_run = _install_fakes(monkeypatch, SlowProgressAgent, cleanup_on=False)
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setenv("HERMES_AGENT_NOTIFY_INTERVAL", "0.05")
+
+    source = SessionSource(platform=Platform.DISCORD, chat_id="1234")
+    session_key = "agent:main:discord:channel:1234"
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-discord-still-working",
+        session_key=session_key,
+    )
+
+    assert result["final_response"] == "done"
+    assert result.get("already_sent") is True
+    assert len(adapter.sent) == 1, adapter.sent
+    progress_mid = adapter.sent[0]["message_id"]
+    progress_edits = [entry for entry in adapter.edits if entry["message_id"] == progress_mid]
+    assert any("Still working" in entry["content"] for entry in progress_edits), adapter.edits
+    assert adapter.edits[-1]["message_id"] == progress_mid
+    assert adapter.edits[-1]["content"] == "done"
+    assert adapter.edits[-1]["finalize"] is True
+
+    await _fire_post_delivery_callback(adapter, session_key, require=True)
+    for _ in range(10):
+        await asyncio.sleep(0.01)
+    assert adapter.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_discord_progress_stays_single_bubble_across_content_segments(monkeypatch, tmp_path):
+    """Discord keeps one editable progress bubble across content resets."""
+    adapter = CleanupCaptureAdapter(platform=Platform.DISCORD)
+    runner = _make_runner(adapter)
+    gateway_run = _install_fakes(monkeypatch, SharedProgressAcrossContentAgent, cleanup_on=False)
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+
+    source = SessionSource(platform=Platform.DISCORD, chat_id="1234")
+    session_key = "agent:main:discord:channel:1234"
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-discord-content",
+        session_key=session_key,
+    )
+
+    assert result["final_response"] == "done"
+    assert result.get("already_sent") is True
+    progress_sends = [entry for entry in adapter.sent if entry["content"].startswith("💻 terminal")]
+    assert len(progress_sends) == 1, adapter.sent
+    progress_mid = progress_sends[0]["message_id"]
+    progress_edits = [entry for entry in adapter.edits if entry["message_id"] == progress_mid]
+    assert progress_edits, adapter.edits
+    # Discord's default compact progress hides raw previews, but the second
+    # tool should still update the same message rather than sending a new one.
+    assert any("×2" in entry["content"] for entry in progress_edits), adapter.edits
+    assert adapter.edits[-1]["message_id"] == progress_mid
+    assert adapter.edits[-1]["content"] == "done"
+    assert adapter.edits[-1]["finalize"] is True
+
+    await _fire_post_delivery_callback(adapter, session_key, require=True)
+    for _ in range(10):
+        await asyncio.sleep(0.01)
+    assert adapter.deleted == []
 
 
 @pytest.mark.asyncio
@@ -613,7 +701,7 @@ async def test_feishu_progress_stays_single_bubble_across_content_segments(monke
     runner = _make_runner(adapter)
     gateway_run = _install_fakes(
         monkeypatch,
-        FeishuProgressAcrossContentAgent,
+        SharedProgressAcrossContentAgent,
         cleanup_on=True,
         platform_key="feishu",
     )
@@ -652,7 +740,7 @@ async def test_feishu_background_review_merges_into_progress_bubble(monkeypatch,
     runner = _make_runner(adapter)
     gateway_run = _install_fakes(
         monkeypatch,
-        FeishuBackgroundReviewProgressAgent,
+        SharedBackgroundReviewProgressAgent,
         cleanup_on=True,
         platform_key="feishu",
     )
@@ -694,7 +782,7 @@ async def test_feishu_progress_edit_failure_does_not_spawn_more_tool_bubbles(mon
     runner = _make_runner(adapter)
     gateway_run = _install_fakes(
         monkeypatch,
-        FeishuProgressAcrossContentAgent,
+        SharedProgressAcrossContentAgent,
         cleanup_on=True,
         platform_key="feishu",
     )
@@ -722,11 +810,11 @@ async def test_feishu_progress_edit_failure_does_not_spawn_more_tool_bubbles(mon
 
 
 @pytest.mark.asyncio
-async def test_cleanup_deletes_deferred_background_review_message(monkeypatch, tmp_path):
-    """Cleanup waits for a post-delivery background/status send, then deletes it."""
+async def test_discord_background_review_merges_into_progress_bubble(monkeypatch, tmp_path):
+    """Discord background-review/status notes should share the progress bubble."""
     adapter = CleanupCaptureAdapter(platform=Platform.DISCORD)
     runner = _make_runner(adapter)
-    gateway_run = _install_fakes(monkeypatch, BackgroundReviewAgent, cleanup_on=False)
+    gateway_run = _install_fakes(monkeypatch, SharedBackgroundReviewProgressAgent, cleanup_on=False)
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
 
     source = SessionSource(platform=Platform.DISCORD, chat_id="1234")
@@ -742,19 +830,16 @@ async def test_cleanup_deletes_deferred_background_review_message(monkeypatch, t
     )
 
     assert result["final_response"] == "done"
+    assert result.get("already_sent") is True
+    assert len(adapter.sent) == 1, adapter.sent
+    progress_mid = adapter.sent[0]["message_id"]
+    progress_edits = [entry for entry in adapter.edits if entry["message_id"] == progress_mid]
+    assert any("💾 Memory updated" in entry["content"] for entry in progress_edits), adapter.edits
+    assert adapter.edits[-1]["message_id"] == progress_mid
+    assert adapter.edits[-1]["content"] == "done"
+    assert adapter.edits[-1]["finalize"] is True
 
     await _fire_post_delivery_callback(adapter, session_key, require=True)
-    for _ in range(40):
+    for _ in range(10):
         await asyncio.sleep(0.01)
-        deleted_ids = {entry["message_id"] for entry in adapter.deleted}
-        bg_ids = {
-            entry["message_id"]
-            for entry in adapter.sent
-            if entry["content"] == "💾 Memory updated"
-        }
-        if bg_ids and bg_ids <= deleted_ids:
-            break
-
-    bg_messages = [entry for entry in adapter.sent if entry["content"] == "💾 Memory updated"]
-    assert len(bg_messages) == 1, adapter.sent
-    assert {bg_messages[0]["message_id"]} <= {entry["message_id"] for entry in adapter.deleted}
+    assert adapter.deleted == []
