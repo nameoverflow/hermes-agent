@@ -460,6 +460,28 @@ class TestTruncateMessage:
         assert "(1/" in chunks[0]
         assert f"({len(chunks)}/{len(chunks)})" in chunks[-1]
 
+    def test_does_not_split_inside_media_marker(self):
+        adapter = self._adapter()
+        marker = "MEDIA:/tmp/" + ("x" * 70) + ".png"
+        msg = "Intro " + ("a" * 60) + "\n" + marker + "\nTail " + ("b" * 80)
+        chunks = adapter.truncate_message(msg, max_length=120)
+        assert len(chunks) > 1
+        assert any(marker in chunk for chunk in chunks)
+        for chunk in chunks:
+            if "MEDIA:" in chunk:
+                assert marker in chunk
+
+    def test_does_not_split_inside_bracketed_directive(self):
+        adapter = self._adapter()
+        directive = "[[audio_as_voice]]"
+        msg = "Intro " + ("a" * 88) + directive + " Tail " + ("b" * 80)
+        chunks = adapter.truncate_message(msg, max_length=120)
+        assert len(chunks) > 1
+        assert any(directive in chunk for chunk in chunks)
+        for chunk in chunks:
+            if "[[" in chunk or "]]" in chunk:
+                assert directive in chunk
+
     def test_code_block_first_chunk_closed(self):
         adapter = self._adapter()
         msg = "Before\n```python\n" + "x = 1\n" * 100 + "```\nAfter"

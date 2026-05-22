@@ -37,6 +37,7 @@ class CleanupCaptureAdapter(BasePlatformAdapter):
 
     def __init__(self, platform=Platform.TELEGRAM):
         super().__init__(PlatformConfig(enabled=True, token="***"), platform)
+        self.MAX_MESSAGE_LENGTH: int = 4096
         self.sent = []
         self.edits = []
         self.deleted = []
@@ -217,6 +218,24 @@ class InterimWithProgressAgent:
             interim_cb("interim agent reply")
         time.sleep(0.45)
         return {"final_response": "done", "messages": [], "api_calls": 1}
+
+
+class LongFinalWithProgressAgent:
+    """Emits progress, then returns a final response too long for one bubble."""
+
+    marker = "MEDIA:/tmp/" + ("b" * 80) + ".png"
+    final_text = "Intro " + ("a" * 60) + "\n" + marker + "\nTail " + ("c" * 120)
+
+    def __init__(self, **kwargs):
+        self.tool_progress_callback = kwargs.get("tool_progress_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        cb = self.tool_progress_callback
+        if cb is not None:
+            cb("tool.started", "terminal", "pwd", {})
+        time.sleep(0.45)
+        return {"final_response": self.final_text, "messages": [], "api_calls": 1}
 
 
 class SlowProgressAgent:
@@ -807,6 +826,51 @@ async def test_feishu_background_review_merges_into_progress_bubble(monkeypatch,
     assert adapter.edits[-1]["finalize"] is True
     assert adapter.deleted == []
     await _fire_post_delivery_callback(adapter, session_key)
+    assert adapter.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_feishu_progress_reuse_splits_long_final_into_two_messages(monkeypatch, tmp_path):
+    """Oversized Feishu finals reuse the progress bubble plus one continuation."""
+    adapter = CleanupCaptureAdapter(platform=Platform.FEISHU)
+    adapter.MAX_MESSAGE_LENGTH = 120
+    runner = _make_runner(adapter)
+    gateway_run = _install_fakes(
+        monkeypatch,
+        LongFinalWithProgressAgent,
+        cleanup_on=True,
+        platform_key="feishu",
+    )
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+
+    source = SessionSource(platform=Platform.FEISHU, chat_id="oc_chat", chat_type="dm")
+    session_key = "agent:main:feishu:dm:oc_chat"
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-feishu-long-final",
+        session_key=session_key,
+    )
+
+    assert result["final_response"] == LongFinalWithProgressAgent.final_text
+    assert result.get("already_sent") is True
+    assert len(adapter.sent) == 2, adapter.sent
+    progress_mid = adapter.sent[0]["message_id"]
+    continuation_mid = adapter.sent[1]["message_id"]
+    assert result.get("continuation_message_ids") == (continuation_mid,)
+    assert adapter.edits[-1]["message_id"] == progress_mid
+    assert adapter.edits[-1]["finalize"] is True
+
+    delivered_chunks = [adapter.edits[-1]["content"], adapter.sent[1]["content"]]
+    assert all(len(chunk) <= adapter.MAX_MESSAGE_LENGTH for chunk in delivered_chunks)
+    marker = LongFinalWithProgressAgent.marker
+    assert any(marker in chunk for chunk in delivered_chunks)
+    for chunk in delivered_chunks:
+        if "MEDIA:" in chunk:
+            assert marker in chunk
     assert adapter.deleted == []
 
 

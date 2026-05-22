@@ -16693,16 +16693,44 @@ class GatewayRunner:
             if len(_ids_snapshot) == 1 and _final_text and _final_text != "(empty)":
                 _reuse_mid = _ids_snapshot[0]
                 _reuse_succeeded = False
+                _final_chunks = [_final_text]
+                try:
+                    _max_len = int(getattr(_cleanup_adapter, "MAX_MESSAGE_LENGTH", 4096) or 4096)
+                except Exception:
+                    _max_len = 4096
+                if _max_len > 0 and len(_final_text) > _max_len:
+                    _final_chunks = _cleanup_adapter.truncate_message(_final_text, _max_len)[:2]
                 try:
                     _reuse_result = await _cleanup_adapter.edit_message(
                         chat_id=_progress_target_chat_id,
                         message_id=_reuse_mid,
-                        content=_final_text,
+                        content=_final_chunks[0],
                         finalize=True,
                     )
                     if getattr(_reuse_result, "success", False):
+                        _continuation_ids = []
+                        for _continuation in _final_chunks[1:]:
+                            _cont_result = await _cleanup_adapter.send(
+                                _progress_target_chat_id,
+                                _continuation,
+                                reply_to=None,
+                                metadata=None,
+                            )
+                            if getattr(_cont_result, "success", False):
+                                _cont_mid = getattr(_cont_result, "message_id", None)
+                                if _cont_mid:
+                                    _continuation_ids.append(str(_cont_mid))
+                            else:
+                                logger.warning(
+                                    "[%s] Progress bubble final continuation send failed: %s",
+                                    source.platform.value,
+                                    getattr(_cont_result, "error", None),
+                                )
+                                break
                         response["already_sent"] = True
                         _reuse_succeeded = True
+                        if _continuation_ids:
+                            response["continuation_message_ids"] = tuple(_continuation_ids)
                     else:
                         logger.debug(
                             "[%s] Progress bubble final reuse failed for %s: %s",

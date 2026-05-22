@@ -3631,6 +3631,27 @@ class BasePlatformAdapter(ABC):
         return content
     
     @staticmethod
+    def _adjust_split_away_from_special_marker(text: str, split_at: int) -> int:
+        """Move a split point out of Hermes inline marker regions.
+
+        Gateway-visible markers such as ``MEDIA:/path/to/file`` and bracketed
+        directives like ``[[audio_as_voice]]`` are parsed later by delivery
+        helpers.  Splitting in the middle of one turns a control marker into
+        visible text (or prevents media delivery), so prefer the start of the
+        marker when a candidate split lands inside it.
+        """
+        if split_at <= 0 or split_at >= len(text):
+            return split_at
+        marker_re = re.compile(r"MEDIA:\S+|\[\[[^\]\n]{1,200}\]\]")
+        for match in marker_re.finditer(text):
+            start, end = match.span()
+            if start < split_at < end:
+                return start if start > 0 else end
+            if start >= split_at:
+                break
+        return split_at
+
+    @staticmethod
     def truncate_message(
         content: str,
         max_length: int = 4096,
@@ -3702,6 +3723,9 @@ class BasePlatformAdapter(ABC):
                 split_at = region.rfind(" ")
             if split_at < 1:
                 split_at = _cp_limit
+            split_at = BasePlatformAdapter._adjust_split_away_from_special_marker(
+                remaining, split_at
+            )
 
             # Avoid splitting inside an inline code span (`...`).
             # If the text before split_at has an odd number of unescaped
