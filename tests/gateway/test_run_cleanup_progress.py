@@ -184,6 +184,41 @@ class SharedBackgroundReviewProgressAgent:
         return {"final_response": "done", "messages": [], "api_calls": 1}
 
 
+class InterimOnlyAgent:
+    """Emits an interim assistant message without any tool-progress events."""
+
+    def __init__(self, **kwargs):
+        self.interim_assistant_callback = None
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        cb = self.interim_assistant_callback
+        if cb is not None:
+            cb("interim agent reply")
+            time.sleep(0.05)
+        return {"final_response": "done", "messages": [], "api_calls": 1}
+
+
+class InterimWithProgressAgent:
+    """Emits tool progress and an interim assistant message in one turn."""
+
+    def __init__(self, **kwargs):
+        self.tool_progress_callback = kwargs.get("tool_progress_callback")
+        self.interim_assistant_callback = None
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        tool_cb = self.tool_progress_callback
+        if tool_cb is not None:
+            tool_cb("tool.started", "terminal", "pwd", {})
+        time.sleep(0.45)
+        interim_cb = self.interim_assistant_callback
+        if interim_cb is not None:
+            interim_cb("interim agent reply")
+        time.sleep(0.45)
+        return {"final_response": "done", "messages": [], "api_calls": 1}
+
+
 class SlowProgressAgent:
     """Runs long enough for a still-working notice after one progress bubble."""
 
@@ -772,6 +807,93 @@ async def test_feishu_background_review_merges_into_progress_bubble(monkeypatch,
     assert adapter.edits[-1]["finalize"] is True
     assert adapter.deleted == []
     await _fire_post_delivery_callback(adapter, session_key)
+    assert adapter.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_feishu_interim_message_merges_into_progress_bubble(monkeypatch, tmp_path):
+    """Feishu interim assistant text should edit the one progress bubble, not send."""
+    adapter = CleanupCaptureAdapter(platform=Platform.FEISHU)
+    runner = _make_runner(adapter)
+    gateway_run = _install_fakes(
+        monkeypatch,
+        InterimWithProgressAgent,
+        cleanup_on=True,
+        platform_key="feishu",
+    )
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+
+    source = SessionSource(platform=Platform.FEISHU, chat_id="oc_chat", chat_type="dm")
+    session_key = "agent:main:feishu:dm:oc_chat"
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-feishu-interim-progress",
+        session_key=session_key,
+    )
+
+    assert result["final_response"] == "done"
+    assert result.get("already_sent") is True
+    assert len(adapter.sent) == 1, adapter.sent
+    progress_mid = adapter.sent[0]["message_id"]
+    progress_edits = [entry for entry in adapter.edits if entry["message_id"] == progress_mid]
+    assert any("interim agent reply" in entry["content"] for entry in progress_edits), adapter.edits
+    assert adapter.edits[-1]["message_id"] == progress_mid
+    assert adapter.edits[-1]["content"] == "done"
+    assert adapter.edits[-1]["finalize"] is True
+    assert adapter.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_feishu_interim_message_suppressed_when_progress_off(monkeypatch, tmp_path):
+    """Feishu must not send standalone interim replies when no shared bubble exists."""
+    adapter = CleanupCaptureAdapter(platform=Platform.FEISHU)
+    runner = _make_runner(adapter)
+    gateway_run = _install_fakes(
+        monkeypatch,
+        InterimOnlyAgent,
+        cleanup_on=True,
+        platform_key="feishu",
+    )
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(
+        gateway_run,
+        "_load_gateway_config",
+        lambda: {
+            "display": {
+                "platforms": {
+                    "feishu": {
+                        "cleanup_progress": True,
+                        "tool_progress": "off",
+                        "interim_assistant_messages": True,
+                        "streaming": False,
+                    }
+                }
+            }
+        },
+    )
+
+    source = SessionSource(platform=Platform.FEISHU, chat_id="oc_chat", chat_type="dm")
+    session_key = "agent:main:feishu:dm:oc_chat"
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-feishu-interim-off",
+        session_key=session_key,
+    )
+
+    assert result["final_response"] == "done"
+    assert not result.get("already_sent")
+    # _run_agent returns the final body for the gateway caller to deliver.  The
+    # interim assistant text should not have gone through adapter.send() first.
+    assert adapter.sent == []
+    assert adapter.edits == []
     assert adapter.deleted == []
 
 

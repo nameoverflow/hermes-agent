@@ -15155,21 +15155,30 @@ class GatewayRunner:
             _status_thread_metadata = self._thread_metadata_for_source(source, event_message_id) if _progress_thread_id else None
 
         def _queue_shared_progress_transient_status(message: str) -> bool:
-            """Fold platform transient/status notices into one progress bubble.
+            """Fold or suppress platform transient/status notices.
 
             Feishu deletion leaves visible recall tombstones, and Discord UX is
             cleaner when final answers replace the temporary progress bubble
-            instead of leaving then deleting tool/status clutter.  When a
-            progress queue exists, status callbacks, background-review notes,
-            and long-running notices should all edit the same temporary bubble
-            that can later be reused as the final answer.
+            instead of leaving then deleting tool/status clutter.  For those
+            platforms, transient/status/interim notices must never fall back to
+            standalone ``send()`` calls: if a progress queue exists, enqueue the
+            text into that single editable bubble; if tool progress is disabled,
+            suppress the transient notice and let the final answer be the only
+            durable message.  This avoids fire-and-forget interim sends landing
+            after the final response and appearing out of order.
             """
-            if source.platform not in {Platform.FEISHU, Platform.DISCORD} or progress_queue is None:
+            if source.platform not in {Platform.FEISHU, Platform.DISCORD}:
                 return False
             _text = str(message or "").strip()
             if not _text:
                 return True
-            progress_queue.put(_text)
+            if progress_queue is not None:
+                progress_queue.put(_text)
+            else:
+                logger.debug(
+                    "[%s] Suppressing standalone transient gateway message because no shared progress bubble is active",
+                    source.platform.value,
+                )
             return True
 
         def _status_callback_sync(event_type: str, message: str) -> None:
@@ -15337,13 +15346,16 @@ class GatewayRunner:
             def _interim_assistant_cb(text: str, *, already_streamed: bool = False) -> None:
                 if not _run_still_current():
                     return
-                if _stream_consumer is not None:
-                    if already_streamed:
+                if already_streamed:
+                    if _stream_consumer is not None:
                         _stream_consumer.on_segment_break()
-                    else:
-                        _stream_consumer.on_commentary(text)
                     return
-                if already_streamed or not _status_adapter or not str(text or "").strip():
+                if _queue_shared_progress_transient_status(text):
+                    return
+                if _stream_consumer is not None:
+                    _stream_consumer.on_commentary(text)
+                    return
+                if not _status_adapter or not str(text or "").strip():
                     return
                 safe_schedule_threadsafe(
                     _status_adapter.send(
