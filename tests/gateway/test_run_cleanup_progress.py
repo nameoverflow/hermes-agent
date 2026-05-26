@@ -128,6 +128,47 @@ class ProgressAgent:
         return {"final_response": "done", "messages": [], "api_calls": 1}
 
 
+class MediaToolResultAgent:
+    """Returns a MEDIA tag in tool JSON; gateway must not auto-append it."""
+
+    def __init__(self, **kwargs):
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        return {
+            "final_response": "Created the audio clip.",
+            "messages": [
+                {
+                    "role": "tool",
+                    "tool_call_id": "tts-1",
+                    "content": '{"success": true, "file_path": "/tmp/clip.ogg", "media_tag": "[[audio_as_voice]]\\nMEDIA:/tmp/clip.ogg"}',
+                }
+            ],
+            "api_calls": 1,
+        }
+
+
+class CompletedProgressAgent:
+    """Emits started/completed pairs so draft checklists show status."""
+
+    def __init__(self, **kwargs):
+        self.tool_progress_callback = kwargs.get("tool_progress_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        cb = self.tool_progress_callback
+        if cb is not None:
+            cb("tool.started", "terminal", "pwd", {})
+            time.sleep(0.35)
+            cb("tool.completed", "terminal", None, None, duration=0.2, is_error=False)
+            time.sleep(0.35)
+            cb("tool.started", "web_search", "openclaw progress drafts", {})
+            time.sleep(0.35)
+            cb("tool.completed", "web_search", None, None, duration=1.4, is_error=True)
+            time.sleep(0.35)
+        return {"final_response": "done", "messages": [], "api_calls": 1}
+
+
 class FailingAgent:
     def __init__(self, **kwargs):
         self.tool_progress_callback = kwargs.get("tool_progress_callback")
@@ -351,6 +392,29 @@ async def _fire_post_delivery_callback(adapter, session_key, *, require: bool = 
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_media_tags_in_tool_results_are_not_auto_appended(monkeypatch, tmp_path):
+    """New attachment delivery is explicit via send_attachment, not tool JSON scraping."""
+    adapter = CleanupCaptureAdapter()
+    runner = _make_runner(adapter)
+    gateway_run = _install_fakes(monkeypatch, MediaToolResultAgent, cleanup_on=False)
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+
+    source = SessionSource(platform=Platform.TELEGRAM, chat_id="-1001")
+    result = await runner._run_agent(
+        message="make audio",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-media",
+        session_key="agent:main:telegram:group:-1001",
+    )
+
+    assert result["final_response"] == "Created the audio clip."
+    assert "MEDIA:" not in result["final_response"]
+    assert "[[audio_as_voice]]" not in result["final_response"]
 
 
 @pytest.mark.asyncio
@@ -682,14 +746,15 @@ async def test_discord_progress_stays_single_bubble_across_content_segments(monk
 
     assert result["final_response"] == "done"
     assert result.get("already_sent") is True
-    progress_sends = [entry for entry in adapter.sent if entry["content"].startswith("💻 terminal")]
+    progress_sends = [entry for entry in adapter.sent if entry["content"].startswith("🔎 Working")]
     assert len(progress_sends) == 1, adapter.sent
     progress_mid = progress_sends[0]["message_id"]
     progress_edits = [entry for entry in adapter.edits if entry["message_id"] == progress_mid]
     assert progress_edits, adapter.edits
-    # Discord's default compact progress hides raw previews, but the second
-    # tool should still update the same message rather than sending a new one.
-    assert any("×2" in entry["content"] for entry in progress_edits), adapter.edits
+    # The second tool should update the same message rather than sending a new
+    # bubble; checklist rendering shows both running rows instead of a dedup
+    # counter.
+    assert any("0/2 done" in entry["content"] for entry in progress_edits), adapter.edits
     assert adapter.edits[-1]["message_id"] == progress_mid
     assert adapter.edits[-1]["content"] == "done"
     assert adapter.edits[-1]["finalize"] is True
@@ -698,6 +763,40 @@ async def test_discord_progress_stays_single_bubble_across_content_segments(monk
     for _ in range(10):
         await asyncio.sleep(0.01)
     assert adapter.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_discord_progress_draft_updates_tool_statuses(monkeypatch, tmp_path):
+    """Discord progress drafts show running/done/failed checklist state."""
+    adapter = CleanupCaptureAdapter(platform=Platform.DISCORD)
+    runner = _make_runner(adapter)
+    gateway_run = _install_fakes(monkeypatch, CompletedProgressAgent, cleanup_on=False)
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+
+    source = SessionSource(platform=Platform.DISCORD, chat_id="1234")
+    session_key = "agent:main:discord:channel:1234"
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-discord-checklist",
+        session_key=session_key,
+    )
+
+    assert result["final_response"] == "done"
+    assert result.get("already_sent") is True
+    progress_mid = adapter.sent[0]["message_id"]
+    progress_edits = [entry for entry in adapter.edits if entry["message_id"] == progress_mid]
+    joined = "\n---\n".join(entry["content"] for entry in progress_edits)
+    first_progress = adapter.sent[0]["content"]
+    assert "🔎 Working · 0/1 done" in first_progress
+    assert "⏳ 💻 terminal" in first_progress
+    assert "🔎 Working · 2/2 done" in joined
+    assert "❌ 🔍 web_search" in joined
+    assert "· 1.4s" in joined
+    assert adapter.edits[-1]["content"] == "done"
 
 
 @pytest.mark.asyncio
@@ -736,7 +835,8 @@ async def test_feishu_still_working_merges_into_progress_bubble(monkeypatch, tmp
     # Only the original progress bubble is sent. The still-working notice and
     # final answer both arrive as edits to that same message.
     assert len(adapter.sent) == 1, adapter.sent
-    assert adapter.sent[0]["content"].startswith("💻 terminal")
+    assert adapter.sent[0]["content"].startswith("🔎 Working")
+    assert "⏳ 💻 terminal" in adapter.sent[0]["content"]
     assert any("Still working" in entry["content"] for entry in adapter.edits), adapter.edits
     assert adapter.edits[-1]["content"] == "done"
     assert adapter.edits[-1]["finalize"] is True
@@ -775,7 +875,7 @@ async def test_feishu_progress_stays_single_bubble_across_content_segments(monke
 
     assert result["final_response"] == "done"
     assert result.get("already_sent") is True
-    progress_sends = [entry for entry in adapter.sent if entry["content"].startswith("💻 terminal")]
+    progress_sends = [entry for entry in adapter.sent if entry["content"].startswith("🔎 Working")]
     assert len(progress_sends) == 1, adapter.sent
     progress_mid = progress_sends[0]["message_id"]
     progress_edits = [entry for entry in adapter.edits if entry["message_id"] == progress_mid]
@@ -855,23 +955,85 @@ async def test_feishu_progress_reuse_splits_long_final_into_two_messages(monkeyp
         session_key=session_key,
     )
 
+    _, cleaned_final = adapter.extract_media(LongFinalWithProgressAgent.final_text)
+    expected_chunks = adapter.truncate_message(cleaned_final, adapter.MAX_MESSAGE_LENGTH)
+
     assert result["final_response"] == LongFinalWithProgressAgent.final_text
     assert result.get("already_sent") is True
-    assert len(adapter.sent) == 2, adapter.sent
+    assert len(adapter.sent) == len(expected_chunks), adapter.sent
     progress_mid = adapter.sent[0]["message_id"]
-    continuation_mid = adapter.sent[1]["message_id"]
-    assert result.get("continuation_message_ids") == (continuation_mid,)
+    assert result.get("continuation_message_ids") == tuple(
+        entry["message_id"] for entry in adapter.sent[1:]
+    )
     assert adapter.edits[-1]["message_id"] == progress_mid
     assert adapter.edits[-1]["finalize"] is True
 
-    delivered_chunks = [adapter.edits[-1]["content"], adapter.sent[1]["content"]]
+    delivered_chunks = [adapter.edits[-1]["content"], *(entry["content"] for entry in adapter.sent[1:])]
+    assert delivered_chunks == expected_chunks
     assert all(len(chunk) <= adapter.MAX_MESSAGE_LENGTH for chunk in delivered_chunks)
-    marker = LongFinalWithProgressAgent.marker
-    assert any(marker in chunk for chunk in delivered_chunks)
-    for chunk in delivered_chunks:
-        if "MEDIA:" in chunk:
-            assert marker in chunk
+    # Progress-bubble reuse edits visible text directly. Legacy marker-looking
+    # strings are no longer control syntax, so they remain visible text.
+    assert any("MEDIA:" in chunk for chunk in delivered_chunks)
     assert adapter.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_progress_reuse_sends_all_final_chunks(monkeypatch, tmp_path):
+    """Progress-bubble reuse must not cap oversized final answers at two messages."""
+
+    class VeryLongFinalWithProgressAgent(ProgressAgent):
+        final_text = "\n\n".join(
+            f"Section {i}: " + ("x" * 95)
+            for i in range(1, 9)
+        )
+
+        def run_conversation(self, message, conversation_history=None, task_id=None):
+            cb = self.tool_progress_callback
+            if cb is not None:
+                cb("tool.started", "terminal", "pwd", {})
+                time.sleep(0.45)
+            return {"final_response": self.final_text, "messages": [], "api_calls": 1}
+
+    adapter = CleanupCaptureAdapter(platform=Platform.FEISHU)
+    adapter.MAX_MESSAGE_LENGTH = 120
+    runner = _make_runner(adapter)
+    gateway_run = _install_fakes(
+        monkeypatch,
+        VeryLongFinalWithProgressAgent,
+        cleanup_on=True,
+        platform_key="feishu",
+    )
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+
+    source = SessionSource(platform=Platform.FEISHU, chat_id="oc_chat", chat_type="dm")
+    session_key = "agent:main:feishu:dm:oc_chat"
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-feishu-very-long-final",
+        session_key=session_key,
+    )
+
+    expected_chunks = adapter.truncate_message(
+        VeryLongFinalWithProgressAgent.final_text,
+        adapter.MAX_MESSAGE_LENGTH,
+    )
+    assert len(expected_chunks) > 2
+    assert result["final_response"] == VeryLongFinalWithProgressAgent.final_text
+    assert result.get("already_sent") is True
+    # One initial progress bubble, then every chunk after the first is sent as
+    # a continuation. Previous code sliced ``[:2]`` and dropped chunk 3+.
+    assert len(adapter.sent) == len(expected_chunks)
+    progress_mid = adapter.sent[0]["message_id"]
+    assert adapter.edits[-1]["message_id"] == progress_mid
+    assert adapter.edits[-1]["content"] == expected_chunks[0]
+    assert [entry["content"] for entry in adapter.sent[1:]] == expected_chunks[1:]
+    assert result.get("continuation_message_ids") == tuple(
+        entry["message_id"] for entry in adapter.sent[1:]
+    )
 
 
 @pytest.mark.asyncio
@@ -988,7 +1150,7 @@ async def test_feishu_progress_edit_failure_does_not_spawn_more_tool_bubbles(mon
 
     assert result["final_response"] == "done"
     assert not result.get("already_sent")
-    progress_sends = [entry for entry in adapter.sent if entry["content"].startswith("💻 terminal")]
+    progress_sends = [entry for entry in adapter.sent if entry["content"].startswith("🔎 Working")]
     assert len(progress_sends) == 1, adapter.sent
     assert all('terminal: "ls"' not in entry["content"] for entry in adapter.sent), adapter.sent
     assert adapter.edits, "edit failures should be attempted, not replaced by sends"

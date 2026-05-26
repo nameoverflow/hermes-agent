@@ -2936,7 +2936,7 @@ class TelegramAdapter(BasePlatformAdapter):
             logger.error("Failed to write update response from callback: %s", exc)
 
     def _missing_media_path_error(self, label: str, path: str) -> str:
-        """Build an actionable file-not-found error for gateway MEDIA delivery.
+        """Build an actionable file-not-found error for explicit attachment delivery.
 
         Paths like /workspace/... or /output/... often only exist inside the
         Docker sandbox, while the gateway process runs on the host.
@@ -2945,8 +2945,8 @@ class TelegramAdapter(BasePlatformAdapter):
         if path.startswith(("/workspace/", "/output/", "/outputs/")):
             error += (
                 " (path may only exist inside the Docker sandbox. "
-                "Bind-mount a host directory and emit the host-visible "
-                "path in MEDIA: for gateway file delivery.)"
+                "Bind-mount a host directory and pass the host-visible "
+                "path to send_attachment.)"
             )
         return error
 

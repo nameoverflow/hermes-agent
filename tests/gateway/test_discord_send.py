@@ -461,3 +461,57 @@ async def test_typing_stop_cleans_up():
 
     await adapter.stop_typing("12345")
     assert "12345" not in adapter._typing_tasks
+
+
+@pytest.mark.asyncio
+async def test_edit_message_finalizes_oversized_content_with_continuations():
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="***"))
+
+    edited_msg = SimpleNamespace(edit=AsyncMock())
+    sent_msgs = [SimpleNamespace(id=2001), SimpleNamespace(id=2002)]
+    channel = SimpleNamespace(
+        fetch_message=AsyncMock(return_value=edited_msg),
+        send=AsyncMock(side_effect=sent_msgs),
+    )
+    adapter._client = SimpleNamespace(
+        get_channel=lambda _chat_id: channel,
+        fetch_channel=AsyncMock(),
+    )
+
+    content = "A" * (adapter.MAX_MESSAGE_LENGTH * 2 + 100)
+    result = await adapter.edit_message("555", "777", content, finalize=True)
+
+    assert result.success is True
+    assert result.message_id == "2002"
+    assert result.continuation_message_ids == ("2001", "2002")
+    edited_content = edited_msg.edit.await_args.kwargs["content"]
+    assert len(edited_content) <= adapter.MAX_MESSAGE_LENGTH
+    assert "..." not in edited_content
+    assert channel.send.await_count == 2
+    for call in channel.send.await_args_list:
+        assert len(call.kwargs["content"]) <= adapter.MAX_MESSAGE_LENGTH
+
+
+@pytest.mark.asyncio
+async def test_edit_message_nonfinal_oversized_does_not_hard_truncate_with_ellipsis():
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="***"))
+
+    edited_msg = SimpleNamespace(edit=AsyncMock())
+    channel = SimpleNamespace(
+        fetch_message=AsyncMock(return_value=edited_msg),
+        send=AsyncMock(),
+    )
+    adapter._client = SimpleNamespace(
+        get_channel=lambda _chat_id: channel,
+        fetch_channel=AsyncMock(),
+    )
+
+    content = "A" * (adapter.MAX_MESSAGE_LENGTH + 100)
+    result = await adapter.edit_message("555", "777", content, finalize=False)
+
+    assert result.success is True
+    assert result.message_id == "777"
+    edited_content = edited_msg.edit.await_args.kwargs["content"]
+    assert len(edited_content) <= adapter.MAX_MESSAGE_LENGTH
+    assert not edited_content.endswith("...")
+    channel.send.assert_not_awaited()

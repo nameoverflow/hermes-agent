@@ -373,17 +373,18 @@ class TestCleanupProgress:
     """``cleanup_progress`` is resolvable per-platform."""
 
     def test_default_off_for_most_platforms(self):
-        """No config set → cleanup_progress is opt-in except Discord."""
+        """No config set → cleanup_progress is opt-in except draft-reuse platforms."""
         from gateway.display_config import resolve_display_setting
 
         for plat in ("telegram", "slack", "email"):
             assert resolve_display_setting({}, plat, "cleanup_progress") is False
 
-    def test_default_on_for_discord(self):
-        """Discord cleans transient tool/background bubbles by default."""
+    def test_default_on_for_discord_and_feishu(self):
+        """Discord/Feishu reuse one transient progress draft as the final answer."""
         from gateway.display_config import resolve_display_setting
 
         assert resolve_display_setting({}, "discord", "cleanup_progress") is True
+        assert resolve_display_setting({}, "feishu", "cleanup_progress") is True
 
     def test_global_true_applies_to_all_platforms(self):
         """display.cleanup_progress=true opts in globally."""

@@ -8026,24 +8026,12 @@ class GatewayRunner:
             if self._should_send_voice_reply(event, response, agent_messages, already_sent=_already_sent):
                 await self._send_voice_reply(event, response)
 
-            # If streaming already delivered the response, extract and
-            # deliver any MEDIA: files before returning None.  Streaming
-            # sends raw text chunks that include MEDIA: tags — the normal
-            # post-processing in _process_message_background is skipped
-            # when already_sent is True, so media files would never be
-            # delivered without this.
-            #
-            # Never skip when the agent failed — the error message is new
-            # content the user hasn't seen (streaming only sent earlier
-            # partial output before the failure).  Without this guard,
-            # users see the agent "stop responding without explanation."
+            # If streaming already delivered the response, return None. Never
+            # skip when the agent failed — the error message is new content the
+            # user hasn't seen (streaming only sent earlier partial output
+            # before the failure). Without this guard, users see the agent
+            # "stop responding without explanation."
             if agent_result.get("already_sent") and not agent_result.get("failed"):
-                if response:
-                    _media_adapter = self.adapters.get(source.platform)
-                    if _media_adapter:
-                        await self._deliver_media_from_response(
-                            response, event, _media_adapter,
-                        )
                 # Streaming already delivered the body text, but the footer was
                 # intentionally held back (see the `not already_sent` gate above).
                 # Send it now as a small trailing message so Telegram/Discord/etc.
@@ -10372,111 +10360,8 @@ class GatewayRunner:
         event: MessageEvent,
         adapter,
     ) -> None:
-        """Extract MEDIA: tags and local file paths from a response and deliver them.
-
-        Called after streaming has already sent the text to the user, so the
-        text itself is already delivered — this only handles file attachments
-        that the normal _process_message_background path would have caught.
-        """
-        from pathlib import Path
-        from urllib.parse import quote as _quote
-
-        try:
-            # Capture [[as_document]] before extract_media strips it, so the
-            # dispatch partition below can route image-extension files
-            # through send_document (preserving bytes) instead of
-            # send_multiple_images (Telegram sendPhoto recompresses to ~1280px).
-            force_document_attachments = "[[as_document]]" in response
-
-            media_files, _ = adapter.extract_media(response)
-            _, cleaned = adapter.extract_images(response)
-            local_files, _ = adapter.extract_local_files(cleaned)
-
-            _thread_meta = self._thread_metadata_for_source(event.source, self._reply_anchor_for_event(event))
-
-            from gateway.platforms.base import should_send_media_as_audio
-
-            _VIDEO_EXTS = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.3gp'}
-            _IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}
-
-            # Partition out images so they can be sent as a single batch
-            # (e.g. Signal's multi-attachment RPC). When [[as_document]] was
-            # set, image-extension files skip the photo path and route to
-            # send_document below — preserving original bytes.
-            image_paths: list = []
-            non_image_media: list = []
-            for media_path, is_voice in media_files:
-                ext = Path(media_path).suffix.lower()
-                if (ext in _IMAGE_EXTS
-                        and not is_voice
-                        and not force_document_attachments):
-                    image_paths.append(media_path)
-                else:
-                    non_image_media.append((media_path, is_voice))
-
-            non_image_local: list = []
-            for file_path in local_files:
-                if (Path(file_path).suffix.lower() in _IMAGE_EXTS
-                        and not force_document_attachments):
-                    image_paths.append(file_path)
-                else:
-                    non_image_local.append(file_path)
-
-            if image_paths:
-                try:
-                    images = [(f"file://{_quote(p)}", "") for p in image_paths]
-                    await adapter.send_multiple_images(
-                        chat_id=event.source.chat_id,
-                        images=images,
-                        metadata=_thread_meta,
-                    )
-                except Exception as e:
-                    logger.warning("[%s] Post-stream image batch delivery failed: %s", adapter.name, e)
-
-            for media_path, is_voice in non_image_media:
-                try:
-                    ext = Path(media_path).suffix.lower()
-                    if should_send_media_as_audio(event.source.platform, ext, is_voice=is_voice):
-                        await adapter.send_voice(
-                            chat_id=event.source.chat_id,
-                            audio_path=media_path,
-                            metadata=_thread_meta,
-                        )
-                    elif ext in _VIDEO_EXTS:
-                        await adapter.send_video(
-                            chat_id=event.source.chat_id,
-                            video_path=media_path,
-                            metadata=_thread_meta,
-                        )
-                    else:
-                        await adapter.send_document(
-                            chat_id=event.source.chat_id,
-                            file_path=media_path,
-                            metadata=_thread_meta,
-                        )
-                except Exception as e:
-                    logger.warning("[%s] Post-stream media delivery failed: %s", adapter.name, e)
-
-            for file_path in non_image_local:
-                try:
-                    ext = Path(file_path).suffix.lower()
-                    if ext in _VIDEO_EXTS:
-                        await adapter.send_video(
-                            chat_id=event.source.chat_id,
-                            video_path=file_path,
-                            metadata=_thread_meta,
-                        )
-                    else:
-                        await adapter.send_document(
-                            chat_id=event.source.chat_id,
-                            file_path=file_path,
-                            metadata=_thread_meta,
-                        )
-                except Exception as e:
-                    logger.warning("[%s] Post-stream file delivery failed: %s", adapter.name, e)
-
-        except Exception as e:
-            logger.warning("Post-stream media extraction failed: %s", e)
+        """No-op: attachment delivery is explicit via send_attachment."""
+        return None
 
     async def _handle_rollback_command(self, event: MessageEvent) -> str:
         """Handle /rollback command — list or restore filesystem checkpoints."""
@@ -10684,9 +10569,9 @@ class GatewayRunner:
             if not response and result and result.get("error"):
                 response = f"Error: {result['error']}"
 
-            # Extract media files from the response
+            # Attachment delivery is explicit via send_attachment; background
+            # task text is not scanned for MEDIA markers or local file paths.
             if response:
-                media_files, response = adapter.extract_media(response)
                 images, text_content = adapter.extract_images(response)
 
                 preview = prompt[:60] + ("..." if len(prompt) > 60 else "")
@@ -10698,31 +10583,20 @@ class GatewayRunner:
                         content=header + text_content,
                         metadata=_thread_metadata,
                     )
-                elif not images and not media_files:
+                elif not images:
                     await adapter.send(
                         chat_id=source.chat_id,
                         content=header + "(No response generated)",
                         metadata=_thread_metadata,
                     )
 
-                # Send extracted images
+                # Send extracted remote images
                 for image_url, alt_text in (images or []):
                     try:
                         await adapter.send_image(
                             chat_id=source.chat_id,
                             image_url=image_url,
                             caption=alt_text,
-                            metadata=_thread_metadata,
-                        )
-                    except Exception:
-                        pass
-
-                # Send media files
-                for media_path, _is_voice in (media_files or []):
-                    try:
-                        await adapter.send_document(
-                            chat_id=source.chat_id,
-                            file_path=media_path,
                             metadata=_thread_metadata,
                         )
                     except Exception:
@@ -14645,6 +14519,8 @@ class GatewayRunner:
         last_tool = [None]  # Mutable container for tracking in closure
         last_progress_msg = [None]  # Track last message for dedup
         repeat_count = [0]  # How many times the same message repeated
+        _progress_seq = [0]
+        _progress_draft_checklist = source.platform in {Platform.FEISHU, Platform.DISCORD}
 
         # Auto-cleanup of temporary progress bubbles (Telegram + any adapter
         # that implements ``delete_message``). When enabled via
@@ -14713,10 +14589,10 @@ class GatewayRunner:
             # /verbose.  We only fire when (a) the user hasn't seen the hint
             # before and (b) /verbose is actually usable on this platform
             # (gateway gate must be open).  The CLI has its own trigger.
-            if event_type == "tool.completed" and not long_tool_hint_fired[0]:
+            if event_type == "tool.completed":
                 try:
                     duration = kwargs.get("duration") or 0
-                    if duration >= _LONG_TOOL_THRESHOLD_S and progress_mode == "all":
+                    if duration >= _LONG_TOOL_THRESHOLD_S and progress_mode == "all" and not long_tool_hint_fired[0]:
                         from agent.onboarding import (
                             TOOL_PROGRESS_FLAG,
                             is_seen,
@@ -14734,10 +14610,20 @@ class GatewayRunner:
                             mark_seen(_hermes_home / "config.yaml", TOOL_PROGRESS_FLAG)
                 except Exception as _hint_err:
                     logger.debug("tool-progress onboarding hint failed: %s", _hint_err)
+                if _progress_draft_checklist:
+                    progress_queue.put((
+                        "__tool_completed__",
+                        str(tool_name or ""),
+                        bool(kwargs.get("is_error")),
+                        float(kwargs.get("duration") or 0.0),
+                    ))
                 return
 
 
-            # Only act on tool.started events (ignore tool.completed, reasoning.available, etc.)
+            # Generic gateway progress only acts on tool.started events.
+            # Discord/Feishu additionally consume tool.completed above so the
+            # one editable draft can behave like a real checklist instead of a
+            # pile of permanent "tool started" breadcrumbs.
             if event_type not in {"tool.started",}:
                 return
 
@@ -14798,6 +14684,20 @@ class GatewayRunner:
                 else:
                     msg = f"{emoji} {tool_name}..."
             
+            if _progress_draft_checklist:
+                _progress_seq[0] += 1
+                progress_queue.put((
+                    "__tool_started__",
+                    {
+                        "kind": "tool",
+                        "id": _progress_seq[0],
+                        "tool": str(tool_name or ""),
+                        "text": msg,
+                        "status": "running",
+                    },
+                ))
+                return
+
             # Dedup: collapse consecutive identical progress messages.
             # Common with execute_code where models iterate with the same
             # code (same boilerplate imports → identical previews).
@@ -14874,11 +14774,63 @@ class GatewayRunner:
                         break
                 return
 
-            progress_lines = []      # Accumulated tool lines
+            progress_lines: list[Any] = []  # Accumulated tool/status lines
             progress_msg_id = None   # ID of the progress message to edit
             can_edit = True          # False once an edit fails (platform doesn't support it)
             _last_edit_ts = 0.0      # Throttle edits to avoid Telegram flood control
             _PROGRESS_EDIT_INTERVAL = 1.5  # Minimum seconds between edits
+
+            def _progress_text(lines: list) -> str:
+                """Render the current progress draft for this platform.
+
+                Discord and Feishu use a compact OpenClaw-style draft: one
+                editable message with a header and checklist statuses. Other
+                platforms keep the historical plain accumulated text.
+                """
+                if not _progress_draft_checklist:
+                    return "\n".join(str(line) for line in lines)
+                tool_lines = [line for line in lines if isinstance(line, dict) and line.get("kind") == "tool"]
+                done_count = sum(1 for line in tool_lines if line.get("status") in {"done", "failed"})
+                total_count = len(tool_lines)
+                if total_count:
+                    header = f"🔎 Working · {done_count}/{total_count} done"
+                else:
+                    header = "🔎 Working"
+                rendered = [header]
+                # Keep the draft short for mobile chat clients while preserving
+                # the recent work that explains what Hermes is doing now.
+                visible_lines = lines[-10:]
+                if len(lines) > len(visible_lines):
+                    rendered.append(f"⋯ {len(lines) - len(visible_lines)} earlier update(s)")
+                for line in visible_lines:
+                    if isinstance(line, dict) and line.get("kind") == "tool":
+                        status = line.get("status") or "running"
+                        marker = "✅" if status == "done" else "❌" if status == "failed" else "⏳"
+                        rendered.append(f"{marker} {line.get('text') or line.get('tool') or 'tool'}")
+                    elif isinstance(line, dict):
+                        rendered.append(str(line.get("text") or "").strip())
+                    else:
+                        rendered.append(f"• {str(line).strip()}")
+                return "\n".join(part for part in rendered if part)
+
+            def _mark_tool_completed(lines: list, tool: str, is_error: bool, duration: float) -> None:
+                """Mark the oldest running matching tool line as completed."""
+                target = None
+                for line in lines:
+                    if not isinstance(line, dict) or line.get("kind") != "tool":
+                        continue
+                    if line.get("status") != "running":
+                        continue
+                    if tool and line.get("tool") != tool:
+                        continue
+                    target = line
+                    break
+                if target is None:
+                    return
+                target["status"] = "failed" if is_error else "done"
+                if duration and duration >= 1.0:
+                    base = str(target.get("text") or target.get("tool") or "tool")
+                    target["text"] = f"{base} · {duration:.1f}s"
 
             while True:
                 try:
@@ -14916,6 +14868,21 @@ class GatewayRunner:
                         else:
                             progress_lines = [f"{base_msg} (×{count + 1})"] if _progress_latest_only else []
                         msg = progress_lines[-1] if progress_lines else base_msg
+                    elif isinstance(raw, tuple) and len(raw) == 2 and raw[0] == "__tool_started__":
+                        entry = raw[1]
+                        if isinstance(entry, dict):
+                            msg = str(entry.get("text") or entry.get("tool") or "tool")
+                            if _progress_latest_only:
+                                progress_lines = [entry]
+                            else:
+                                progress_lines.append(entry)
+                        else:
+                            msg = str(entry)
+                            progress_lines = [msg] if _progress_latest_only else [*progress_lines, msg]
+                    elif isinstance(raw, tuple) and len(raw) == 4 and raw[0] == "__tool_completed__":
+                        _, tool, is_error, duration = raw
+                        _mark_tool_completed(progress_lines, str(tool or ""), bool(is_error), float(duration or 0.0))
+                        msg = _progress_text(progress_lines)
                     elif isinstance(raw, tuple) and len(raw) >= 1 and raw[0] == "__reset__":
                         # Content bubble just landed on the platform — close off
                         # the current tool-progress bubble so the next tool
@@ -14963,7 +14930,7 @@ class GatewayRunner:
 
                     if can_edit and progress_msg_id is not None:
                         # Try to edit the existing progress message
-                        full_text = "\n".join(progress_lines)
+                        full_text = _progress_text(progress_lines)
                         result = await adapter.edit_message(
                             chat_id=_progress_target_chat_id,
                             message_id=progress_msg_id,
@@ -15001,7 +14968,7 @@ class GatewayRunner:
                             can_edit = False
                             _flood_result = await adapter.send(
                                 chat_id=source.chat_id,
-                                content=msg,
+                                content=str(msg),
                                 reply_to=_progress_reply_to,
                                 metadata=_progress_metadata,
                             )
@@ -15014,7 +14981,7 @@ class GatewayRunner:
                     else:
                         if can_edit:
                             # First tool: send all accumulated text as new message
-                            full_text = "\n".join(progress_lines)
+                            full_text = _progress_text(progress_lines)
                             result = await adapter.send(
                                 chat_id=source.chat_id,
                                 content=full_text,
@@ -15025,7 +14992,7 @@ class GatewayRunner:
                             # Editing unsupported: send just this line
                             result = await adapter.send(
                                 chat_id=source.chat_id,
-                                content=msg,
+                                content=str(msg),
                                 reply_to=_progress_reply_to,
                                 metadata=_progress_metadata,
                             )
@@ -15052,6 +15019,16 @@ class GatewayRunner:
                                 _, base_msg, count = raw
                                 if progress_lines:
                                     progress_lines[-1] = f"{base_msg} (×{count + 1})"
+                            elif isinstance(raw, tuple) and len(raw) == 2 and raw[0] == "__tool_started__":
+                                entry = raw[1]
+                                if isinstance(entry, dict):
+                                    if _progress_latest_only:
+                                        progress_lines = [entry]
+                                    else:
+                                        progress_lines.append(entry)
+                            elif isinstance(raw, tuple) and len(raw) == 4 and raw[0] == "__tool_completed__":
+                                _, tool, is_error, duration = raw
+                                _mark_tool_completed(progress_lines, str(tool or ""), bool(is_error), float(duration or 0.0))
                             elif isinstance(raw, tuple) and len(raw) >= 1 and raw[0] == "__reset__":
                                 # Content-bubble marker during drain: close off
                                 # the current progress bubble and start a fresh
@@ -15059,7 +15036,7 @@ class GatewayRunner:
                                 if source.platform in {Platform.FEISHU, Platform.DISCORD}:
                                     continue
                                 if can_edit and progress_lines and progress_msg_id:
-                                    _pending_text = "\n".join(progress_lines)
+                                    _pending_text = _progress_text(progress_lines)
                                     try:
                                         await adapter.edit_message(
                                             chat_id=_progress_target_chat_id,
@@ -15081,7 +15058,7 @@ class GatewayRunner:
                             break
                     # Final edit with all remaining tools (only if editing works)
                     if can_edit and progress_lines and progress_msg_id:
-                        full_text = "\n".join(progress_lines)
+                        full_text = _progress_text(progress_lines)
                         try:
                             await adapter.edit_message(
                                 chat_id=_progress_target_chat_id,
@@ -15633,18 +15610,8 @@ class GatewayRunner:
                         entry = _build_replay_entry(role, content, msg)
                         agent_history.append(entry)
             
-            # Collect MEDIA paths already in history so we can exclude them
-            # from the current turn's extraction. This is compression-safe:
-            # even if the message list shrinks, we know which paths are old.
-            _history_media_paths: set = set()
-            for _hm in agent_history:
-                if _hm.get("role") in {"tool", "function"}:
-                    _hc = _hm.get("content", "")
-                    if "MEDIA:" in _hc:
-                        for _match in re.finditer(r'MEDIA:(\S+)', _hc):
-                            _p = _match.group(1).strip().rstrip('",}')
-                            if _p:
-                                _history_media_paths.add(_p)
+            # Attachment delivery is model-explicit via send_attachment.  Do not
+            # scrape file-delivery markers out of history or tool results.
             
             # Register per-session gateway approval callback so dangerous
             # command approval blocks the agent thread (mirrors CLI input()).
@@ -15913,40 +15880,11 @@ class GatewayRunner:
                     "context_length": _context_length,
                 }
             
-            # Scan tool results for MEDIA:<path> tags that need to be delivered
-            # as native audio/file attachments.  The TTS tool embeds MEDIA: tags
-            # in its JSON response, but the model's final text reply usually
-            # doesn't include them.  We collect unique tags from tool results and
-            # append any that aren't already present in the final response, so the
-            # adapter's extract_media() can find and deliver the files exactly once.
-            #
-            # Uses path-based deduplication against _history_media_paths (collected
-            # before run_conversation) instead of index slicing. This is safe even
-            # when context compression shrinks the message list. (Fixes #160)
-            if "MEDIA:" not in final_response:
-                media_tags = []
-                has_voice_directive = False
-                for msg in result.get("messages", []):
-                    if msg.get("role") in {"tool", "function"}:
-                        content = msg.get("content", "")
-                        if "MEDIA:" in content:
-                            for match in re.finditer(r'MEDIA:(\S+)', content):
-                                path = match.group(1).strip().rstrip('",}')
-                                if path and path not in _history_media_paths:
-                                    media_tags.append(f"MEDIA:{path}")
-                            if "[[audio_as_voice]]" in content:
-                                has_voice_directive = True
-                
-                if media_tags:
-                    seen = set()
-                    unique_tags = []
-                    for tag in media_tags:
-                        if tag not in seen:
-                            seen.add(tag)
-                            unique_tags.append(tag)
-                    if has_voice_directive:
-                        unique_tags.insert(0, "[[audio_as_voice]]")
-                    final_response = final_response + "\n" + "\n".join(unique_tags)
+            # Attachment delivery is now model-explicit: tools that create files
+            # return structured paths, and the agent should call send_attachment
+            # when a file needs to be delivered.  Do not scrape MEDIA-like
+            # strings out of tool results or final text; that made attachment
+            # delivery depend on magic strings in arbitrary JSON/text.
             
             # Sync session_id: the agent may have created a new session during
             # mid-run context compression (_compress_context splits sessions).
@@ -16693,20 +16631,24 @@ class GatewayRunner:
             if len(_ids_snapshot) == 1 and _final_text and _final_text != "(empty)":
                 _reuse_mid = _ids_snapshot[0]
                 _reuse_succeeded = False
-                _final_chunks = [_final_text]
+                _edit_text = _final_text
+                _final_chunks = [_edit_text]
                 try:
                     _max_len = int(getattr(_cleanup_adapter, "MAX_MESSAGE_LENGTH", 4096) or 4096)
                 except Exception:
                     _max_len = 4096
-                if _max_len > 0 and len(_final_text) > _max_len:
-                    _final_chunks = _cleanup_adapter.truncate_message(_final_text, _max_len)[:2]
+                if _max_len > 0 and len(_edit_text) > _max_len:
+                    _final_chunks = _cleanup_adapter.truncate_message(_edit_text, _max_len)
                 try:
-                    _reuse_result = await _cleanup_adapter.edit_message(
-                        chat_id=_progress_target_chat_id,
-                        message_id=_reuse_mid,
-                        content=_final_chunks[0],
-                        finalize=True,
-                    )
+                    if not _final_chunks[0].strip():
+                        _reuse_result = None
+                    else:
+                        _reuse_result = await _cleanup_adapter.edit_message(
+                            chat_id=_progress_target_chat_id,
+                            message_id=_reuse_mid,
+                            content=_final_chunks[0],
+                            finalize=True,
+                        )
                     if getattr(_reuse_result, "success", False):
                         _continuation_ids = []
                         for _continuation in _final_chunks[1:]:

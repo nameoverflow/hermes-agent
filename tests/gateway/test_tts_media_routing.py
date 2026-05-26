@@ -1,10 +1,8 @@
 """
-Tests for cross-platform audio/voice media routing.
+Tests that legacy MEDIA-looking text no longer triggers implicit attachment routing.
 
-These tests pin the expected delivery path for audio media files across
-Telegram (where Bot-API sendAudio only accepts MP3/M4A and .ogg/.opus
-only renders as a voice bubble when explicitly flagged) and via
-``GatewayRunner._deliver_media_from_response``.
+Audio/image files should be delivered by the explicit send_attachment tool, not
+by scanning final response text or streaming output for magic strings.
 """
 
 from types import SimpleNamespace
@@ -51,7 +49,7 @@ def _event(thread_id=None):
 
 
 @pytest.mark.asyncio
-async def test_base_adapter_routes_telegram_flac_media_tag_to_document_sender():
+async def test_base_adapter_does_not_route_flac_media_text_to_document_sender():
     adapter = _MediaRoutingAdapter()
     event = _event()
     adapter._message_handler = AsyncMock(return_value="MEDIA:/tmp/speech.flac")
@@ -60,16 +58,12 @@ async def test_base_adapter_routes_telegram_flac_media_tag_to_document_sender():
 
     await adapter._process_message_background(event, build_session_key(event.source))
 
-    adapter.send_document.assert_awaited_once_with(
-        chat_id="chat-1",
-        file_path="/tmp/speech.flac",
-        metadata=None,
-    )
+    adapter.send_document.assert_not_awaited()
     adapter.send_voice.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_base_adapter_routes_non_voice_telegram_ogg_media_tag_to_document_sender():
+async def test_base_adapter_does_not_route_ogg_media_text_to_document_sender():
     adapter = _MediaRoutingAdapter()
     event = _event()
     adapter._message_handler = AsyncMock(return_value="MEDIA:/tmp/speech.ogg")
@@ -78,16 +72,12 @@ async def test_base_adapter_routes_non_voice_telegram_ogg_media_tag_to_document_
 
     await adapter._process_message_background(event, build_session_key(event.source))
 
-    adapter.send_document.assert_awaited_once_with(
-        chat_id="chat-1",
-        file_path="/tmp/speech.ogg",
-        metadata=None,
-    )
+    adapter.send_document.assert_not_awaited()
     adapter.send_voice.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_base_adapter_routes_voice_tagged_telegram_ogg_media_tag_to_voice_sender():
+async def test_base_adapter_does_not_route_voice_tagged_media_text_to_voice_sender():
     adapter = _MediaRoutingAdapter()
     event = _event()
     adapter._message_handler = AsyncMock(
@@ -98,11 +88,7 @@ async def test_base_adapter_routes_voice_tagged_telegram_ogg_media_tag_to_voice_
 
     await adapter._process_message_background(event, build_session_key(event.source))
 
-    adapter.send_voice.assert_awaited_once_with(
-        chat_id="chat-1",
-        audio_path="/tmp/speech.ogg",
-        metadata=None,
-    )
+    adapter.send_voice.assert_not_awaited()
     adapter.send_document.assert_not_awaited()
 
 
@@ -117,7 +103,7 @@ def _fake_runner(thread_meta):
 
 
 @pytest.mark.asyncio
-async def test_streaming_delivery_routes_telegram_flac_media_tag_to_document_sender():
+async def test_streaming_delivery_does_not_route_flac_media_text_to_document_sender():
     event = _event(thread_id="topic-1")
     adapter = SimpleNamespace(
         name="test",
@@ -137,16 +123,12 @@ async def test_streaming_delivery_routes_telegram_flac_media_tag_to_document_sen
         adapter,
     )
 
-    adapter.send_document.assert_awaited_once_with(
-        chat_id="chat-1",
-        file_path="/tmp/speech.flac",
-        metadata={"thread_id": "topic-1"},
-    )
+    adapter.send_document.assert_not_awaited()
     adapter.send_voice.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_streaming_delivery_routes_non_voice_telegram_ogg_media_tag_to_document_sender():
+async def test_streaming_delivery_does_not_route_ogg_media_text_to_document_sender():
     event = _event(thread_id="topic-1")
     adapter = SimpleNamespace(
         name="test",
@@ -166,18 +148,12 @@ async def test_streaming_delivery_routes_non_voice_telegram_ogg_media_tag_to_doc
         adapter,
     )
 
-    adapter.send_document.assert_awaited_once_with(
-        chat_id="chat-1",
-        file_path="/tmp/speech.ogg",
-        metadata={"thread_id": "topic-1"},
-    )
+    adapter.send_document.assert_not_awaited()
     adapter.send_voice.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_streaming_delivery_routes_telegram_mp3_media_tag_to_voice_sender():
-    """MP3 audio on Telegram must go through send_voice (which routes to
-    sendAudio internally); Telegram accepts MP3 for the audio player."""
+async def test_streaming_delivery_does_not_route_mp3_media_text_to_voice_sender():
     event = _event(thread_id="topic-1")
     adapter = SimpleNamespace(
         name="test",
@@ -197,9 +173,49 @@ async def test_streaming_delivery_routes_telegram_mp3_media_tag_to_voice_sender(
         adapter,
     )
 
-    adapter.send_voice.assert_awaited_once_with(
-        chat_id="chat-1",
-        audio_path="/tmp/speech.mp3",
-        metadata={"thread_id": "topic-1"},
-    )
+    adapter.send_voice.assert_not_awaited()
     adapter.send_document.assert_not_awaited()
+
+
+def test_extract_media_ignores_literal_media_syntax_examples():
+    media, cleaned = BasePlatformAdapter.extract_media(
+        "Literal syntax: `MEDIA:` / `[[audio_as_voice]]` / `[[as_document]]`"
+    )
+
+    assert media == []
+    assert "MEDIA:" in cleaned
+
+
+def test_extract_media_ignores_root_path_false_positive():
+    media, cleaned = BasePlatformAdapter.extract_media("MEDIA:/")
+
+    assert media == []
+    assert cleaned == "MEDIA:/"
+
+
+@pytest.mark.asyncio
+async def test_streaming_delivery_ignores_literal_media_syntax_examples():
+    event = _event(thread_id="topic-1")
+    adapter = SimpleNamespace(
+        name="test",
+        extract_media=BasePlatformAdapter.extract_media,
+        extract_images=BasePlatformAdapter.extract_images,
+        extract_local_files=BasePlatformAdapter.extract_local_files,
+        send_voice=AsyncMock(return_value=SendResult(success=True, message_id="voice")),
+        send_document=AsyncMock(return_value=SendResult(success=True, message_id="doc")),
+        send_image_file=AsyncMock(return_value=SendResult(success=True, message_id="image")),
+        send_video=AsyncMock(return_value=SendResult(success=True, message_id="video")),
+        send_multiple_images=AsyncMock(),
+    )
+
+    await GatewayRunner._deliver_media_from_response(
+        _fake_runner({"thread_id": "topic-1"}),
+        "Literal syntax: `MEDIA:` / `[[audio_as_voice]]` / `[[as_document]]`",
+        event,
+        adapter,
+    )
+
+    adapter.send_document.assert_not_awaited()
+    adapter.send_voice.assert_not_awaited()
+    adapter.send_video.assert_not_awaited()
+    adapter.send_multiple_images.assert_not_awaited()

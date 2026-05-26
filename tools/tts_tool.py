@@ -1629,8 +1629,8 @@ def text_to_speech_tool(
     Reads provider/voice config from ~/.hermes/config.yaml (tts: section).
     The model sends text; the user configures voice and provider.
 
-    On messaging platforms, the returned MEDIA:<path> tag is intercepted
-    by the send pipeline and delivered as a native voice message.
+    On messaging platforms, call send_attachment with the returned file_path
+    (mode='voice' when voice_compatible is true) to deliver the audio.
     In CLI mode, the file is saved to ~/voice-memos/.
 
     Args:
@@ -1855,15 +1855,11 @@ def text_to_speech_tool(
         file_size = os.path.getsize(file_str)
         logger.info("TTS audio saved: %s (%s bytes, provider: %s)", file_str, f"{file_size:,}", provider)
 
-        # Build response with MEDIA tag for platform delivery
-        media_tag = f"MEDIA:{file_str}"
-        if voice_compatible:
-            media_tag = f"[[audio_as_voice]]\n{media_tag}"
-
+        # Build response with a structured file_path. Gateway agents should call
+        # send_attachment explicitly when this audio should be delivered.
         return json.dumps({
             "success": True,
             "file_path": file_str,
-            "media_tag": media_tag,
             "provider": provider,
             "voice_compatible": voice_compatible,
         }, ensure_ascii=False)
@@ -2255,7 +2251,7 @@ from tools.registry import registry, tool_error
 
 TTS_SCHEMA = {
     "name": "text_to_speech",
-    "description": "Convert text to speech audio. Returns a MEDIA: path that the platform delivers as native audio. Compatible providers render as a voice bubble on Telegram; otherwise audio is sent as a regular attachment. In CLI mode, saves to ~/voice-memos/. Voice and provider are user-configured (built-in providers like edge/openai or custom command providers under tts.providers.<name>), not model-selected.",
+    "description": "Convert text to speech audio. Returns JSON with file_path and voice_compatible. On messaging platforms, call send_attachment with path=file_path and mode='voice' when voice_compatible is true (otherwise mode='auto') to deliver it as native audio. In CLI mode, saves to ~/voice-memos/. Voice and provider are user-configured (built-in providers like edge/openai or custom command providers under tts.providers.<name>), not model-selected.",
     "parameters": {
         "type": "object",
         "properties": {

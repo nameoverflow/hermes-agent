@@ -1,4 +1,4 @@
-"""Tests for GatewayStreamConsumer — media directive stripping in streaming."""
+"""Tests for GatewayStreamConsumer — streaming display preserves normal text."""
 
 import asyncio
 from types import SimpleNamespace
@@ -13,68 +13,61 @@ from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
 
 
 class TestCleanForDisplay:
-    """Verify MEDIA: directives and internal markers are stripped from display text."""
+    """Verify legacy attachment-looking text is displayed literally."""
 
     def test_no_media_passthrough(self):
         """Text without MEDIA: passes through unchanged."""
         text = "Here is your analysis of the image."
         assert GatewayStreamConsumer._clean_for_display(text) == text
 
-    def test_media_tag_stripped(self):
-        """Basic MEDIA:<path> tag is removed."""
+    def test_media_tag_preserved(self):
+        """Basic MEDIA:<path> text is preserved literally."""
         text = "Here is the image\nMEDIA:/tmp/hermes/image.png"
         result = GatewayStreamConsumer._clean_for_display(text)
-        assert "MEDIA:" not in result
-        assert "Here is the image" in result
+        assert result == text
 
-    def test_media_tag_with_space(self):
-        """MEDIA: tag with space after colon is removed."""
+    def test_media_tag_with_space_preserved(self):
+        """MEDIA: text with space after colon is preserved."""
         text = "Audio generated\nMEDIA: /home/user/.hermes/audio_cache/voice.mp3"
         result = GatewayStreamConsumer._clean_for_display(text)
-        assert "MEDIA:" not in result
-        assert "Audio generated" in result
+        assert result == text
 
-    def test_media_tag_with_quotes(self):
-        """MEDIA: tags wrapped in quotes or backticks are removed."""
+    def test_media_tag_with_quotes_preserved(self):
+        """MEDIA-looking text wrapped in quotes or backticks is preserved."""
         for wrapper in ['`MEDIA:/path/file.png`', '"MEDIA:/path/file.png"', "'MEDIA:/path/file.png'"]:
             text = f"Result: {wrapper}"
             result = GatewayStreamConsumer._clean_for_display(text)
-            assert "MEDIA:" not in result, f"Failed for wrapper: {wrapper}"
+            assert result == text
 
-    def test_audio_as_voice_stripped(self):
-        """[[audio_as_voice]] directive is removed."""
+    def test_audio_as_voice_text_preserved(self):
+        """Legacy voice marker-looking text is preserved literally."""
         text = "[[audio_as_voice]]\nMEDIA:/tmp/voice.ogg"
         result = GatewayStreamConsumer._clean_for_display(text)
-        assert "[[audio_as_voice]]" not in result
-        assert "MEDIA:" not in result
+        assert result == text
 
-    def test_multiple_media_tags(self):
-        """Multiple MEDIA: tags are all removed."""
+    def test_multiple_media_tags_preserved(self):
+        """Multiple MEDIA-looking strings are preserved literally."""
         text = "Here are two files:\nMEDIA:/tmp/a.png\nMEDIA:/tmp/b.jpg"
         result = GatewayStreamConsumer._clean_for_display(text)
-        assert "MEDIA:" not in result
-        assert "Here are two files:" in result
+        assert result == text
 
-    def test_excessive_newlines_collapsed(self):
-        """Blank lines left by removed tags are collapsed."""
+    def test_excessive_newlines_preserved(self):
+        """No marker stripping means original whitespace is preserved."""
         text = "Before\n\n\nMEDIA:/tmp/file.png\n\n\nAfter"
         result = GatewayStreamConsumer._clean_for_display(text)
-        # Should not have 3+ consecutive newlines
-        assert "\n\n\n" not in result
+        assert result == text
 
-    def test_media_only_response(self):
-        """Response that is entirely MEDIA: tags returns empty/whitespace."""
+    def test_media_only_response_preserved(self):
+        """A response that is entirely MEDIA-looking text is sent as text."""
         text = "MEDIA:/tmp/image.png"
         result = GatewayStreamConsumer._clean_for_display(text)
-        assert result.strip() == ""
+        assert result == text
 
-    def test_media_mid_sentence(self):
-        """MEDIA: tag embedded in prose is stripped cleanly."""
+    def test_media_mid_sentence_preserved(self):
+        """MEDIA-looking text embedded in prose is preserved."""
         text = "I generated this image MEDIA:/tmp/art.png for you."
         result = GatewayStreamConsumer._clean_for_display(text)
-        assert "MEDIA:" not in result
-        assert "generated" in result
-        assert "for you." in result
+        assert result == text
 
     def test_preserves_non_media_colons(self):
         """Normal colons and text with 'MEDIA' as a word aren't stripped."""
@@ -170,12 +163,12 @@ class TestEditMessageFinalizeSignature:
         )
 
 
-class TestSendOrEditMediaStripping:
-    """Verify _send_or_edit strips MEDIA: before sending to the platform."""
+class TestSendOrEditMediaTextPreserved:
+    """Verify _send_or_edit does not hide legacy marker-looking text."""
 
     @pytest.mark.asyncio
-    async def test_first_send_strips_media(self):
-        """Initial send removes MEDIA: tags from visible text."""
+    async def test_first_send_preserves_media_text(self):
+        """Initial send preserves MEDIA-looking text."""
         adapter = MagicMock()
         send_result = SimpleNamespace(success=True, message_id="msg_1")
         adapter.send = AsyncMock(return_value=send_result)
@@ -186,12 +179,11 @@ class TestSendOrEditMediaStripping:
 
         adapter.send.assert_called_once()
         sent_text = adapter.send.call_args[1]["content"]
-        assert "MEDIA:" not in sent_text
-        assert "Here is your image" in sent_text
+        assert sent_text == "Here is your image\nMEDIA:/tmp/test.png"
 
     @pytest.mark.asyncio
-    async def test_edit_strips_media(self):
-        """Edit call removes MEDIA: tags from visible text."""
+    async def test_edit_preserves_media_text(self):
+        """Edit call preserves MEDIA-looking text."""
         adapter = MagicMock()
         send_result = SimpleNamespace(success=True, message_id="msg_1")
         edit_result = SimpleNamespace(success=True)
@@ -207,11 +199,11 @@ class TestSendOrEditMediaStripping:
 
         adapter.edit_message.assert_called_once()
         edited_text = adapter.edit_message.call_args[1]["content"]
-        assert "MEDIA:" not in edited_text
+        assert edited_text == "Here is the result\nMEDIA:/tmp/image.png"
 
     @pytest.mark.asyncio
-    async def test_media_only_skips_send(self):
-        """If text is entirely MEDIA: tags, the send is skipped."""
+    async def test_media_only_text_sends(self):
+        """If text is entirely MEDIA-looking text, it is sent as text."""
         adapter = MagicMock()
         adapter.send = AsyncMock()
         adapter.MAX_MESSAGE_LENGTH = 4096
@@ -219,7 +211,8 @@ class TestSendOrEditMediaStripping:
         consumer = GatewayStreamConsumer(adapter, "chat_123")
         await consumer._send_or_edit("MEDIA:/tmp/image.png")
 
-        adapter.send.assert_not_called()
+        adapter.send.assert_called_once()
+        assert adapter.send.call_args[1]["content"] == "MEDIA:/tmp/image.png"
 
     @pytest.mark.asyncio
     async def test_cursor_only_update_skips_send(self):
@@ -330,7 +323,7 @@ class TestStreamRunMediaStripping:
 
     @pytest.mark.asyncio
     async def test_stream_with_media_tag(self):
-        """Full stream run strips MEDIA: from the final visible message."""
+        """Full stream run preserves MEDIA-looking text in the visible message."""
         adapter = MagicMock()
         send_result = SimpleNamespace(success=True, message_id="msg_1")
         edit_result = SimpleNamespace(success=True)
@@ -348,15 +341,14 @@ class TestStreamRunMediaStripping:
 
         await consumer.run()
 
-        # Verify the final text sent/edited doesn't contain MEDIA:
+        # Verify the final text sent/edited preserves MEDIA-looking text
         all_calls = []
         for call in adapter.send.call_args_list:
             all_calls.append(call[1].get("content", ""))
         for call in adapter.edit_message.call_args_list:
             all_calls.append(call[1].get("content", ""))
 
-        for sent_text in all_calls:
-            assert "MEDIA:" not in sent_text, f"MEDIA: leaked into display: {sent_text!r}"
+        assert any("MEDIA:/home/user/.hermes/cache/images/abc123.png" in sent_text for sent_text in all_calls)
 
         assert consumer.already_sent
 

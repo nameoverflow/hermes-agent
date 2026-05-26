@@ -473,7 +473,8 @@ class TestTextToSpeechToolWithCommandProvider:
         data = json.loads(result)
         assert data["success"] is True
         assert data["voice_compatible"] is True
-        assert data["media_tag"].startswith("[[audio_as_voice]]")
+        assert data["file_path"] == str(out)
+        assert "media_tag" not in data
 
     def test_missing_command_falls_through_to_builtin(self, tmp_path):
         """A provider entry with an empty command is not a command

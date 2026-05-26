@@ -2089,60 +2089,14 @@ class BasePlatformAdapter(ABC):
 
     @staticmethod
     def extract_media(content: str) -> Tuple[List[Tuple[str, bool]], str]:
+        """Do not parse attachment control strings from response text.
+
+        Attachment delivery is explicit via the ``send_attachment`` tool.  This
+        method remains only as a compatibility shim for callers that expect the
+        old return shape; it intentionally treats ``MEDIA:``,
+        ``[[audio_as_voice]]``, and ``[[as_document]]`` as ordinary text.
         """
-        Extract MEDIA:<path> tags and [[audio_as_voice]] directives from response text.
-
-        The TTS tool returns responses like:
-            [[audio_as_voice]]
-            MEDIA:/path/to/audio.ogg
-
-        Skills that produce large/lossless images (e.g. info-graph, where a
-        rendered JPG is 1-2 MB but Telegram's sendPhoto recompresses to
-        ~200 KB at 1280px) can use ``[[as_document]]`` to request unmodified
-        delivery via sendDocument instead of sendPhoto/sendMediaGroup. The
-        directive is detected at the dispatch sites (which have access to the
-        original response); this method just strips it so it never leaks into
-        user-visible text. Per-file granularity is intentionally not exposed —
-        when an agent emits ``[[as_document]]`` once, every image path in the
-        same response is delivered as a document, mirroring the all-or-nothing
-        scope of ``[[audio_as_voice]]``.
-
-        Args:
-            content: The response text to scan.
-
-        Returns:
-            Tuple of (list of (path, is_voice) pairs, cleaned content with tags removed).
-        """
-        media = []
-        cleaned = content
-
-        # Check for [[audio_as_voice]] directive
-        has_voice_tag = "[[audio_as_voice]]" in content
-        cleaned = cleaned.replace("[[audio_as_voice]]", "")
-        # Strip [[as_document]] directive — callers inspect the original
-        # ``content`` for it (so they can still react to it); here we just
-        # keep it out of the user-visible cleaned text.
-        cleaned = cleaned.replace("[[as_document]]", "")
-        
-        # Extract MEDIA:<path> tags, allowing optional whitespace after the colon
-        # and quoted/backticked paths for LLM-formatted outputs.
-        media_pattern = re.compile(
-            r'''[`"']?MEDIA:\s*(?P<path>`[^`\n]+`|"[^"\n]+"|'[^'\n]+'|(?:~/|/)\S+(?:[^\S\n]+\S+)*?\.(?:png|jpe?g|gif|webp|mp4|mov|avi|mkv|webm|ogg|opus|mp3|wav|m4a|flac|epub|pdf|zip|rar|7z|docx?|xlsx?|pptx?|txt|csv|apk|ipa)(?=[\s`"',;:)\]}]|$)|\S+)[`"']?'''
-        )
-        for match in media_pattern.finditer(content):
-            path = match.group("path").strip()
-            if len(path) >= 2 and path[0] == path[-1] and path[0] in "`\"'":
-                path = path[1:-1].strip()
-            path = path.lstrip("`\"'").rstrip("`\"',.;:)}]")
-            if path:
-                media.append((os.path.expanduser(path), has_voice_tag))
-
-        # Remove MEDIA tags from content (including surrounding quote/backtick wrappers)
-        if media:
-            cleaned = media_pattern.sub('', cleaned)
-            cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
-        
-        return media, cleaned
+        return [], content
 
     @staticmethod
     def extract_local_files(content: str) -> Tuple[List[str], str]:
@@ -3120,30 +3074,20 @@ class BasePlatformAdapter(ABC):
             if not response:
                 logger.debug("[%s] Handler returned empty/None response for %s", self.name, event.source.chat_id)
             if response:
-                # Capture [[as_document]] before extract_media strips it, so the
-                # dispatch partition below can route image-extension files
-                # through send_document instead of send_multiple_images. Used
-                # by skills that produce large/lossless images (e.g. info-graph)
-                # where Telegram's sendPhoto recompression destroys legibility.
-                force_document_attachments = "[[as_document]]" in response
-
-                # Extract MEDIA:<path> tags (from TTS tool) before other processing
-                media_files, response = self.extract_media(response)
+                # Attachment delivery is explicit via send_attachment.  Response
+                # text is no longer scanned for MEDIA:/path, [[...]] directives,
+                # or bare local paths that would silently become attachments.
+                media_files = []
+                local_files = []
+                force_document_attachments = False
 
                 # Extract image URLs and send them as native platform attachments
                 images, text_content = self.extract_images(response)
-                # Strip any remaining internal directives from message body (fixes #1561)
-                text_content = text_content.replace("[[audio_as_voice]]", "").strip()
-                text_content = text_content.replace("[[as_document]]", "").strip()
-                text_content = re.sub(r"MEDIA:\s*\S+", "", text_content).strip()
                 if images:
                     logger.info("[%s] extract_images found %d image(s) in response (%d chars)", self.name, len(images), len(response))
 
-                # Auto-detect bare local file paths for native media delivery
-                # (helps small models that don't use MEDIA: syntax)
-                local_files, text_content = self.extract_local_files(text_content)
-                if local_files:
-                    logger.info("[%s] extract_local_files found %d file(s) in response", self.name, len(local_files))
+                # Local file attachments must be sent via send_attachment;
+                # do not auto-detect bare local paths in final text.
                 
                 # Auto-TTS: if voice message, generate audio FIRST (before sending text)
                 # Gated via ``_should_auto_tts_for_chat``: fires when the chat has
@@ -3239,96 +3183,9 @@ class BasePlatformAdapter(ABC):
                         logger.warning("[%s] Error batching images: %s", self.name, batch_err, exc_info=True)
 
 
-                # Send extracted media files — route by file type
-                _VIDEO_EXTS = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.3gp'}
-                _IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}
-
-                # Partition images out of media_files + local_files so they
-                # can be sent as a single batch (Signal RPC). When
-                # ``[[as_document]]`` was set on the original response, image
-                # files skip the photo path and route to send_document below
-                # so they're delivered with original bytes (no Telegram
-                # sendPhoto recompression).
-                from urllib.parse import quote as _quote
-                _image_paths: list = []
-                _non_image_media: list = []
-                for media_path, is_voice in media_files:
-                    _ext = Path(media_path).suffix.lower()
-                    if (_ext in _IMAGE_EXTS
-                            and not is_voice
-                            and not force_document_attachments):
-                        _image_paths.append(media_path)
-                    else:
-                        _non_image_media.append((media_path, is_voice))
-                _non_image_local: list = []
-                for file_path in local_files:
-                    if (Path(file_path).suffix.lower() in _IMAGE_EXTS
-                            and not force_document_attachments):
-                        _image_paths.append(file_path)
-                    else:
-                        _non_image_local.append(file_path)
-
-                if _image_paths:
-                    try:
-                        _batch = [(f"file://{_quote(p)}", "") for p in _image_paths]
-                        await self.send_multiple_images(
-                            chat_id=event.source.chat_id,
-                            images=_batch,
-                            metadata=_thread_metadata,
-                            human_delay=human_delay,
-                        )
-                    except Exception as batch_err:
-                        logger.warning("[%s] Error batching images: %s", self.name, batch_err, exc_info=True)
-
-                for media_path, is_voice in _non_image_media:
-                    if human_delay > 0:
-                        await asyncio.sleep(human_delay)
-                    try:
-                        ext = Path(media_path).suffix.lower()
-                        if should_send_media_as_audio(self.platform, ext, is_voice=is_voice):
-                            media_result = await self.send_voice(
-                                chat_id=event.source.chat_id,
-                                audio_path=media_path,
-                                metadata=_thread_metadata,
-                            )
-                        elif ext in _VIDEO_EXTS:
-                            media_result = await self.send_video(
-                                chat_id=event.source.chat_id,
-                                video_path=media_path,
-                                metadata=_thread_metadata,
-                            )
-                        else:
-                            media_result = await self.send_document(
-                                chat_id=event.source.chat_id,
-                                file_path=media_path,
-                                metadata=_thread_metadata,
-                            )
-
-                        if not media_result.success:
-                            logger.warning("[%s] Failed to send media (%s): %s", self.name, ext, media_result.error)
-                    except Exception as media_err:
-                        logger.warning("[%s] Error sending media: %s", self.name, media_err)
-
-                # Send auto-detected local non-image files as native attachments
-                for file_path in _non_image_local:
-                    if human_delay > 0:
-                        await asyncio.sleep(human_delay)
-                    try:
-                        ext = Path(file_path).suffix.lower()
-                        if ext in _VIDEO_EXTS:
-                            await self.send_video(
-                                chat_id=event.source.chat_id,
-                                video_path=file_path,
-                                metadata=_thread_metadata,
-                            )
-                        else:
-                            await self.send_document(
-                                chat_id=event.source.chat_id,
-                                file_path=file_path,
-                                metadata=_thread_metadata,
-                            )
-                    except Exception as file_err:
-                        logger.error("[%s] Error sending local file %s: %s", self.name, file_path, file_err)
+                # File attachments are not inferred from final text. Use the
+                # explicit send_attachment tool for local files, voice notes,
+                # videos, or original-byte image/document delivery.
 
             # Determine overall success for the processing hook
             processing_ok = delivery_succeeded if delivery_attempted else not bool(response)
@@ -3632,23 +3489,7 @@ class BasePlatformAdapter(ABC):
     
     @staticmethod
     def _adjust_split_away_from_special_marker(text: str, split_at: int) -> int:
-        """Move a split point out of Hermes inline marker regions.
-
-        Gateway-visible markers such as ``MEDIA:/path/to/file`` and bracketed
-        directives like ``[[audio_as_voice]]`` are parsed later by delivery
-        helpers.  Splitting in the middle of one turns a control marker into
-        visible text (or prevents media delivery), so prefer the start of the
-        marker when a candidate split lands inside it.
-        """
-        if split_at <= 0 or split_at >= len(text):
-            return split_at
-        marker_re = re.compile(r"MEDIA:\S+|\[\[[^\]\n]{1,200}\]\]")
-        for match in marker_re.finditer(text):
-            start, end = match.span()
-            if start < split_at < end:
-                return start if start > 0 else end
-            if start >= split_at:
-                break
+        """Return split_at unchanged; response text has no control markers."""
         return split_at
 
     @staticmethod

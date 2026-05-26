@@ -137,7 +137,7 @@ SEND_MESSAGE_SCHEMA = {
             },
             "message": {
                 "type": "string",
-                "description": "The message text to send. To send an image or file, include MEDIA:<local_path> (e.g. 'MEDIA:/tmp/hermes/cache/img_xxx.jpg') in the message — the platform will deliver it as a native media attachment."
+                "description": "The message text to send. For native file/image/audio attachments, prefer the send_attachment tool instead of embedding attachment markers in message text."
             }
         },
         "required": []
@@ -240,16 +240,7 @@ def _handle_send(args):
         else:
             return tool_error(f"Platform '{platform_name}' is not configured. Set up credentials in ~/.hermes/config.yaml or environment variables.")
 
-    from gateway.platforms.base import BasePlatformAdapter
-
-    # Capture [[as_document]] directive before extract_media strips it.
-    # Image-extension files in this batch will route through send_document
-    # instead of send_photo so the original bytes survive (e.g. info-graph
-    # JPGs where Telegram's sendPhoto recompresses to 1280px).
-    force_document_attachments = "[[as_document]]" in message
-
-    media_files, cleaned_message = BasePlatformAdapter.extract_media(message)
-    mirror_text = cleaned_message.strip() or _describe_media_for_mirror(media_files)
+    mirror_text = message.strip()
 
     used_home_channel = False
     if not chat_id:
@@ -280,10 +271,8 @@ def _handle_send(args):
                 platform,
                 pconfig,
                 chat_id,
-                cleaned_message,
+                message,
                 thread_id=thread_id,
-                media_files=media_files,
-                force_document=force_document_attachments,
             )
         )
         if used_home_channel and isinstance(result, dict) and result.get("success"):

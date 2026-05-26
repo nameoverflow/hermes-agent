@@ -1610,10 +1610,21 @@ class DiscordAdapter(BasePlatformAdapter):
                 channel = await self._client.fetch_channel(int(chat_id))
             msg = await channel.fetch_message(int(message_id))
             formatted = self.format_message(content)
-            if len(formatted) > self.MAX_MESSAGE_LENGTH:
-                formatted = formatted[:self.MAX_MESSAGE_LENGTH - 3] + "..."
-            await msg.edit(content=formatted)
-            return SendResult(success=True, message_id=message_id)
+            chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
+            first_chunk = chunks[0] if chunks else ""
+            await msg.edit(content=first_chunk)
+
+            continuation_ids = []
+            if finalize and len(chunks) > 1:
+                for chunk in chunks[1:]:
+                    cont_msg = await channel.send(content=chunk)
+                    continuation_ids.append(str(cont_msg.id))
+
+            return SendResult(
+                success=True,
+                message_id=continuation_ids[-1] if continuation_ids else message_id,
+                continuation_message_ids=tuple(continuation_ids),
+            )
         except Exception as e:  # pragma: no cover - defensive logging
             logger.error("[%s] Failed to edit Discord message %s: %s", self.name, message_id, e, exc_info=True)
             return SendResult(success=False, error=str(e))

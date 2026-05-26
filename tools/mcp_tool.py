@@ -435,7 +435,7 @@ def _resolve_stdio_command(command: str, env: dict) -> tuple[str, dict]:
 
 
 # ---------------------------------------------------------------------------
-# MCP ImageContent block → Hermes MEDIA tag
+# MCP ImageContent block → cached local path hint
 # ---------------------------------------------------------------------------
 
 
@@ -450,7 +450,7 @@ def _mcp_image_extension_for_mime_type(mime_type: str) -> str:
 
 def _cache_mcp_image_block(block) -> str:
     """Cache an MCP ``ImageContent`` block to the shared image cache and
-    return a ``MEDIA:<path>`` tag that Hermes gateways know how to render.
+    return a local file-path hint for the agent.
 
     Returns an empty string when *block* is not an image, when the base64
     payload is malformed, or when the cache helper rejects the bytes (e.g.
@@ -489,7 +489,7 @@ def _cache_mcp_image_block(block) -> str:
         logger.warning("MCP image block cache failed: %s", exc)
         return ""
 
-    return f"MEDIA:{image_path}"
+    return f"[MCP image saved to {image_path}; call send_attachment with this path to deliver it]"
 
 
 def _format_connect_error(exc: BaseException) -> str:
@@ -2254,8 +2254,8 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
             # Collect text from content blocks. MCP tool results can also
             # include ImageContent blocks (screenshot / Blockbench / Playwright
             # etc.); cache those via the gateway's image-cache helper so they
-            # flow through Hermes' MEDIA: tag convention and out to messaging
-            # adapters that render images natively. Without this, image blocks
+            # flow through structured file paths and the explicit
+            # send_attachment tool instead of legacy text markers.
             # were silently dropped and the agent got an empty response.
             #
             # Distilled from #17915 (c3115644151) and #10848 (gnanirahulnutakki),

@@ -55,9 +55,9 @@ class TestMimeExtension:
 
 
 class TestCacheMcpImageBlock:
-    def test_returns_media_tag_for_valid_image_block(self, tmp_path, monkeypatch):
-        """A well-formed ImageContent block with valid PNG bytes caches
-        to the image dir and the helper returns a ``MEDIA:<path>`` tag."""
+    def test_returns_path_hint_for_valid_image_block(self, tmp_path, monkeypatch):
+        """A well-formed ImageContent block caches to the image dir and returns
+        a structured path hint telling the agent to call send_attachment."""
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         from tools.mcp_tool import _cache_mcp_image_block
 
@@ -66,16 +66,17 @@ class TestCacheMcpImageBlock:
             mimeType="image/png",
         )
         tag = _cache_mcp_image_block(block)
-        assert tag.startswith("MEDIA:"), f"expected MEDIA: tag, got {tag!r}"
+        assert "send_attachment" in tag
+        assert "MEDIA:" not in tag
         # The cached file should be in Hermes' image cache dir
         from gateway.platforms.base import get_image_cache_dir
         cache_dir = str(get_image_cache_dir().resolve())
-        assert tag.startswith(f"MEDIA:{cache_dir}"), (
+        assert cache_dir in tag, (
             f"cached file not under HERMES_HOME image cache dir. "
             f"tag={tag!r}, cache_dir={cache_dir!r}"
         )
         # And it should exist + have the PNG bytes
-        path = tag[len("MEDIA:"):]
+        path = tag.split("MCP image saved to ", 1)[1].split(";", 1)[0]
         with open(path, "rb") as fh:
             assert fh.read() == _png_bytes()
 
@@ -134,5 +135,6 @@ class TestCacheMcpImageBlock:
             mimeType="image/jpeg",
         )
         tag = _cache_mcp_image_block(block)
-        assert tag.startswith("MEDIA:")
-        assert tag.endswith(".jpg"), f"expected .jpg extension, got {tag!r}"
+        assert "send_attachment" in tag
+        assert "MEDIA:" not in tag
+        assert ".jpg" in tag, f"expected .jpg extension, got {tag!r}"

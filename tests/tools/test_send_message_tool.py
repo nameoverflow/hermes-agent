@@ -138,9 +138,7 @@ class TestSendMessageTool:
             telegram_cfg,
             "-1001",
             "hello",
-            thread_id="17585",
-            media_files=[],
-            force_document=False,
+            thread_id="17585"
         )
 
     def test_display_label_target_resolves_via_channel_directory(self, tmp_path):
@@ -177,9 +175,7 @@ class TestSendMessageTool:
             telegram_cfg,
             "-1001",
             "hello",
-            thread_id="17585",
-            media_files=[],
-            force_document=False,
+            thread_id="17585"
         )
 
     def test_mirror_receives_current_session_user_id(self):
