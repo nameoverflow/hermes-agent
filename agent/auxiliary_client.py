@@ -755,7 +755,8 @@ class _CodexCompletionsAdapter:
 
         def _check_cancelled() -> None:
             if deadline is not None and time.monotonic() >= deadline:
-                timed_out.set()
+                if not timed_out.is_set():
+                    _close_client_on_timeout()
                 raise TimeoutError(_timeout_message())
             try:
                 from tools.interrupt import is_interrupted
@@ -769,37 +770,109 @@ class _CodexCompletionsAdapter:
                 pass
 
         try:
-            # Collect output items and text deltas during streaming —
-            # the Codex backend can return empty response.output from
-            # get_final_response() even when items were streamed.
+            # Collect output items and text deltas from the raw server-event
+            # stream. Codex can emit a terminal response snapshot with
+            # empty/None output even when usable output_item.done events were
+            # already delivered.
             collected_output_items: List[Any] = []
             collected_text_deltas: List[str] = []
             has_function_calls = False
+            final = None
             if total_timeout:
                 timeout_timer = threading.Timer(float(total_timeout), _close_client_on_timeout)
                 timeout_timer.daemon = True
                 timeout_timer.start()
             _check_cancelled()
-            with self._client.responses.stream(**resp_kwargs) as stream:
-                for _event in stream:
+            stream_or_response = self._client.responses.create(**{**resp_kwargs, "stream": True})
+            if isinstance(getattr(stream_or_response, "output", None), list):
+                final = stream_or_response
+            else:
+                try:
+                    for _event in stream_or_response:
+                        _check_cancelled()
+                        _etype = getattr(_event, "type", "")
+                        if not _etype and isinstance(_event, dict):
+                            _etype = _event.get("type", "")
+                        if _etype == "response.output_item.done":
+                            _done = getattr(_event, "item", None)
+                            if _done is None and isinstance(_event, dict):
+                                _done = _event.get("item")
+                            if _done is not None:
+                                collected_output_items.append(_done)
+                            _done_type = getattr(_done, "type", None) if _done is not None else None
+                            if _done_type is None and isinstance(_done, dict):
+                                _done_type = _done.get("type")
+                            if _done_type == "function_call":
+                                has_function_calls = True
+                        elif "output_text.delta" in _etype:
+                            _delta = getattr(_event, "delta", "")
+                            if not _delta and isinstance(_event, dict):
+                                _delta = _event.get("delta", "")
+                            if _delta:
+                                collected_text_deltas.append(_delta)
+                        elif "function_call" in _etype:
+                            has_function_calls = True
+                        elif _etype in {"response.output_item.added", "response.output_item.delta"}:
+                            _item = getattr(_event, "item", None)
+                            if _item is None and isinstance(_event, dict):
+                                _item = _event.get("item")
+                            _item_type = getattr(_item, "type", None) if _item is not None else None
+                            if _item_type is None and isinstance(_item, dict):
+                                _item_type = _item.get("type")
+                            if _item_type == "function_call":
+                                has_function_calls = True
+                        elif _etype in {"response.completed", "response.incomplete", "response.failed"}:
+                            final = getattr(_event, "response", None)
+                            if final is None and isinstance(_event, dict):
+                                final = _event.get("response")
+                            break
                     _check_cancelled()
-                    _etype = getattr(_event, "type", "")
-                    if _etype == "response.output_item.done":
-                        _done = getattr(_event, "item", None)
-                        if _done is not None:
-                            collected_output_items.append(_done)
-                    elif "output_text.delta" in _etype:
-                        _delta = getattr(_event, "delta", "")
-                        if _delta:
-                            collected_text_deltas.append(_delta)
-                    elif "function_call" in _etype:
-                        has_function_calls = True
-                _check_cancelled()
-                final = stream.get_final_response()
+                finally:
+                    close_fn = getattr(stream_or_response, "close", None)
+                    if callable(close_fn):
+                        try:
+                            close_fn()
+                        except Exception:
+                            pass
+
+            if final is None:
+                if collected_output_items:
+                    final = SimpleNamespace(
+                        output=list(collected_output_items),
+                        output_text=None,
+                        status="completed",
+                        model=model,
+                        usage=None,
+                    )
+                    logger.warning(
+                        "Codex auxiliary raw stream ended without a terminal response; "
+                        "recovered from %d output item(s) and %d text delta(s).",
+                        len(collected_output_items),
+                        len(collected_text_deltas),
+                    )
+                elif collected_text_deltas and not has_function_calls:
+                    assembled = "".join(collected_text_deltas)
+                    final = SimpleNamespace(
+                        output=[SimpleNamespace(
+                            type="message", role="assistant", status="completed",
+                            content=[SimpleNamespace(type="output_text", text=assembled)],
+                        )],
+                        output_text=assembled,
+                        status="completed",
+                        model=model,
+                        usage=None,
+                    )
+                    logger.warning(
+                        "Codex auxiliary raw stream ended without a terminal response; "
+                        "synthesized from %d text delta(s) (%d chars).",
+                        len(collected_text_deltas), len(assembled),
+                    )
+                else:
+                    raise RuntimeError("Codex auxiliary raw stream did not emit a terminal response")
 
             # Backfill empty output from collected stream events
             _output = getattr(final, "output", None)
-            if isinstance(_output, list) and not _output:
+            if not isinstance(_output, list) or not _output:
                 if collected_output_items:
                     final.output = list(collected_output_items)
                     logger.debug(
@@ -819,6 +892,8 @@ class _CodexCompletionsAdapter:
                         "Codex auxiliary: synthesized from %d deltas (%d chars)",
                         len(collected_text_deltas), len(assembled),
                     )
+                elif not isinstance(_output, list):
+                    final.output = []
 
             # Extract text and tool calls from the Responses output.
             # Items may be SDK objects (attrs) or dicts (raw/fallback paths),
@@ -829,7 +904,10 @@ class _CodexCompletionsAdapter:
                     val = obj.get(key, default)
                 return val if val is not None else default
 
-            for item in getattr(final, "output", []):
+            output_items = getattr(final, "output", [])
+            if not isinstance(output_items, list):
+                output_items = []
+            for item in output_items:
                 item_type = _item_get(item, "type")
                 if item_type == "message":
                     for part in (_item_get(item, "content") or []):
@@ -1820,7 +1898,8 @@ def _build_xai_oauth_aux_client(model: str) -> Tuple[Optional[Any], Optional[str
 
     xAI's ``/v1/responses`` endpoint speaks the OpenAI Responses API, so we
     wrap a plain ``OpenAI`` client in ``CodexAuxiliaryClient`` to translate
-    ``chat.completions.create()`` calls into ``responses.stream()`` requests.
+    ``chat.completions.create()`` calls into raw ``responses.create(stream=True)``
+    requests.
 
     The caller must pass an explicit model — pinning a default for Grok
     would silently rot when xAI's allowlist drifts.  Returns ``(None, None)``
@@ -2797,8 +2876,8 @@ def resolve_provider_client(
         async_mode: If True, return an async-compatible client.
         raw_codex: If True, return a raw OpenAI client for Codex providers
             instead of wrapping in CodexAuxiliaryClient.  Use this when
-            the caller needs direct access to responses.stream() (e.g.,
-            the main agent loop).
+            the caller owns raw Responses event aggregation (e.g., the main
+            agent loop).
         explicit_base_url: Optional direct OpenAI-compatible endpoint.
         explicit_api_key: Optional API key paired with explicit_base_url.
         api_mode: API mode override.  One of "chat_completions",
@@ -2927,7 +3006,7 @@ def resolve_provider_client(
             return None, None
         if raw_codex:
             # Return the raw OpenAI client for callers that need direct
-            # access to responses.stream() (e.g., the main agent loop).
+            # access to Responses event streams (e.g., the main agent loop).
             codex_token = _read_codex_access_token()
             if not codex_token:
                 logger.warning("resolve_provider_client: openai-codex requested "
@@ -3220,7 +3299,7 @@ def resolve_provider_client(
         # Copilot GPT-5+ models (except gpt-5-mini) require the Responses
         # API — they are not accessible via /chat/completions.  Wrap the
         # plain client in CodexAuxiliaryClient so call_llm() transparently
-        # routes through responses.stream().
+        # routes through raw Responses streaming.
         if provider == "copilot" and final_model and not raw_codex:
             try:
                 from hermes_cli.models import _should_use_copilot_responses_api

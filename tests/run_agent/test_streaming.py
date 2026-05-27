@@ -766,6 +766,10 @@ class TestHasStreamConsumers:
 class TestCodexStreamCallbacks:
     """Verify _run_codex_stream fires delta callbacks."""
 
+    @staticmethod
+    def _codex_kwargs():
+        return {"model": "test/model", "instructions": "hi", "input": []}
+
     def test_codex_text_delta_fires_callback(self):
         from run_agent import AIAgent
 
@@ -783,7 +787,6 @@ class TestCodexStreamCallbacks:
         agent.api_mode = "codex_responses"
         agent._interrupt_requested = False
 
-        # Mock the stream context manager
         mock_event_text = SimpleNamespace(
             type="response.output_text.delta",
             delta="Hello from Codex!",
@@ -794,22 +797,15 @@ class TestCodexStreamCallbacks:
         )
 
         mock_stream = MagicMock()
-        mock_stream.__enter__ = MagicMock(return_value=mock_stream)
-        mock_stream.__exit__ = MagicMock(return_value=False)
         mock_stream.__iter__ = MagicMock(return_value=iter([mock_event_text, mock_event_done]))
-        mock_stream.get_final_response.return_value = SimpleNamespace(
-            output=[SimpleNamespace(
-                type="message",
-                content=[SimpleNamespace(type="output_text", text="Hello from Codex!")],
-            )],
-            status="completed",
-        )
+        mock_stream.close = MagicMock()
 
         mock_client = MagicMock()
-        mock_client.responses.stream.return_value = mock_stream
+        mock_client.responses.create.return_value = mock_stream
 
-        response = agent._run_codex_stream({}, client=mock_client)
+        response = agent._run_codex_stream(self._codex_kwargs(), client=mock_client)
         assert "Hello from Codex!" in deltas
+        assert response.output[0].content[0].text == "Hello from Codex!"
 
     def test_codex_stream_refreshes_activity_on_every_event(self):
         from run_agent import AIAgent
@@ -842,23 +838,15 @@ class TestCodexStreamCallbacks:
         )
 
         mock_stream = MagicMock()
-        mock_stream.__enter__ = MagicMock(return_value=mock_stream)
-        mock_stream.__exit__ = MagicMock(return_value=False)
         mock_stream.__iter__ = MagicMock(
             return_value=iter([mock_event_text_1, mock_event_text_2, mock_event_done])
         )
-        mock_stream.get_final_response.return_value = SimpleNamespace(
-            output=[SimpleNamespace(
-                type="message",
-                content=[SimpleNamespace(type="output_text", text="Hello world")],
-            )],
-            status="completed",
-        )
+        mock_stream.close = MagicMock()
 
         mock_client = MagicMock()
-        mock_client.responses.stream.return_value = mock_stream
+        mock_client.responses.create.return_value = mock_stream
 
-        agent._run_codex_stream({}, client=mock_client)
+        agent._run_codex_stream(self._codex_kwargs(), client=mock_client)
 
         assert touch_calls.count("receiving stream response") == 3
 
@@ -875,7 +863,7 @@ class TestCodexStreamCallbacks:
         )
 
         mock_client = MagicMock()
-        mock_client.responses.stream.side_effect = httpx.RemoteProtocolError(
+        mock_client.responses.create.side_effect = httpx.RemoteProtocolError(
             "peer closed connection without sending complete message body"
         )
 
@@ -894,7 +882,7 @@ class TestCodexStreamCallbacks:
             response = agent._run_codex_stream({}, client=mock_client)
 
         assert response is fallback_response
-        mock_fallback.assert_called_once_with({}, client=mock_client)
+        mock_fallback.assert_called_once_with({}, client=mock_client, on_first_delta=None)
 
     def test_codex_create_stream_fallback_refreshes_activity_on_every_event(self):
         from run_agent import AIAgent

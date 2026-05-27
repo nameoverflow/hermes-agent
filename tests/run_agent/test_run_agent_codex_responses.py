@@ -400,58 +400,59 @@ def test_build_api_kwargs_copilot_responses_omits_reasoning_for_non_reasoning_mo
 
 def test_run_codex_stream_retries_when_completed_event_missing(monkeypatch):
     agent = _build_agent(monkeypatch)
-    calls = {"stream": 0}
-
-    def _fake_stream(**kwargs):
-        calls["stream"] += 1
-        if calls["stream"] == 1:
-            return _FakeResponsesStream(
-                final_error=RuntimeError("Didn't receive a `response.completed` event.")
-            )
-        return _FakeResponsesStream(final_response=_codex_message_response("stream ok"))
-
-    agent.client = SimpleNamespace(
-        responses=SimpleNamespace(
-            stream=_fake_stream,
-            create=lambda **kwargs: _codex_message_response("fallback"),
-        )
-    )
-
-    response = agent._run_codex_stream(_codex_request_kwargs())
-    assert calls["stream"] == 2
-    assert response.output[0].content[0].text == "stream ok"
-
-
-def test_run_codex_stream_falls_back_to_create_after_stream_completion_error(monkeypatch):
-    agent = _build_agent(monkeypatch)
-    calls = {"stream": 0, "create": 0}
-
-    def _fake_stream(**kwargs):
-        calls["stream"] += 1
-        return _FakeResponsesStream(
-            final_error=RuntimeError("Didn't receive a `response.completed` event.")
-        )
+    calls = {"create": 0}
 
     def _fake_create(**kwargs):
         calls["create"] += 1
-        return _codex_message_response("create fallback ok")
+        assert kwargs.get("stream") is True
+        if calls["create"] == 1:
+            return _FakeCreateStream(
+                [
+                    SimpleNamespace(type="response.created"),
+                    SimpleNamespace(type="response.in_progress"),
+                ]
+            )
+        return _FakeCreateStream(
+            [
+                SimpleNamespace(type="response.created"),
+                SimpleNamespace(type="response.completed", response=_codex_message_response("stream ok")),
+            ]
+        )
 
     agent.client = SimpleNamespace(
         responses=SimpleNamespace(
-            stream=_fake_stream,
             create=_fake_create,
         )
     )
 
     response = agent._run_codex_stream(_codex_request_kwargs())
-    assert calls["stream"] == 2
+    assert calls["create"] == 2
+    assert response.output[0].content[0].text == "stream ok"
+
+
+def test_run_codex_stream_accepts_concrete_create_response(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    calls = {"create": 0}
+
+    def _fake_create(**kwargs):
+        calls["create"] += 1
+        assert kwargs.get("stream") is True
+        return _codex_message_response("create fallback ok")
+
+    agent.client = SimpleNamespace(
+        responses=SimpleNamespace(
+            create=_fake_create,
+        )
+    )
+
+    response = agent._run_codex_stream(_codex_request_kwargs())
     assert calls["create"] == 1
     assert response.output[0].content[0].text == "create fallback ok"
 
 
 def test_run_codex_stream_fallback_parses_create_stream_events(monkeypatch):
     agent = _build_agent(monkeypatch)
-    calls = {"stream": 0, "create": 0}
+    calls = {"create": 0}
     create_stream = _FakeCreateStream(
         [
             SimpleNamespace(type="response.created"),
@@ -460,12 +461,6 @@ def test_run_codex_stream_fallback_parses_create_stream_events(monkeypatch):
         ]
     )
 
-    def _fake_stream(**kwargs):
-        calls["stream"] += 1
-        return _FakeResponsesStream(
-            final_error=RuntimeError("Didn't receive a `response.completed` event.")
-        )
-
     def _fake_create(**kwargs):
         calls["create"] += 1
         assert kwargs.get("stream") is True
@@ -473,16 +468,75 @@ def test_run_codex_stream_fallback_parses_create_stream_events(monkeypatch):
 
     agent.client = SimpleNamespace(
         responses=SimpleNamespace(
-            stream=_fake_stream,
             create=_fake_create,
         )
     )
 
     response = agent._run_codex_stream(_codex_request_kwargs())
-    assert calls["stream"] == 2
     assert calls["create"] == 1
     assert create_stream.closed is True
     assert response.output[0].content[0].text == "streamed create ok"
+
+
+def test_run_codex_stream_recovers_when_raw_stream_ends_after_output_item(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    output_item = SimpleNamespace(
+        type="message",
+        role="assistant",
+        status="completed",
+        content=[SimpleNamespace(type="output_text", text="stream recovered")],
+    )
+
+    class _NoTerminalRawStream:
+        def __iter__(self):
+            yield SimpleNamespace(type="response.output_item.done", item=output_item)
+
+        def close(self):
+            pass
+
+    agent.client = SimpleNamespace(
+        responses=SimpleNamespace(
+            create=lambda **kwargs: _NoTerminalRawStream(),
+        )
+    )
+
+    response = agent._run_codex_stream(_codex_request_kwargs())
+
+    assert response.status == "completed"
+    assert response.output == [output_item]
+
+
+def test_codex_create_stream_fallback_recovers_when_sdk_terminal_parse_sees_null_output(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    output_item = SimpleNamespace(
+        type="message",
+        role="assistant",
+        status="completed",
+        content=[SimpleNamespace(type="output_text", text="fallback recovered")],
+    )
+
+    class _NoTerminalCreateStream:
+        closed = False
+
+        def __iter__(self):
+            yield SimpleNamespace(type="response.output_item.done", item=output_item)
+
+        def close(self):
+            self.closed = True
+
+    create_stream = _NoTerminalCreateStream()
+    client = SimpleNamespace(
+        responses=SimpleNamespace(create=lambda **kwargs: create_stream)
+    )
+
+    response = agent._run_codex_create_stream_fallback(
+        _codex_request_kwargs(),
+        client=client,
+    )
+
+    assert response.status == "completed"
+    assert response.output == [output_item]
+    assert create_stream.closed is True
 
 
 def test_run_conversation_codex_plain_text(monkeypatch):
@@ -1965,3 +2019,137 @@ def test_preflight_codex_input_deduplicates_reasoning_ids(monkeypatch):
     # IDs must be stripped — with store=False the API 404s on id lookups.
     for it in reasoning_items:
         assert "id" not in it
+
+
+def test_run_codex_stream_backfills_none_final_output_from_done_item(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    output_item = SimpleNamespace(
+        type="message",
+        role="assistant",
+        status="completed",
+        content=[SimpleNamespace(type="output_text", text="stream item")],
+    )
+
+    class _NullOutputFinalStream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield SimpleNamespace(type="response.output_item.done", item=output_item)
+
+        def get_final_response(self):
+            return SimpleNamespace(
+                output=None,
+                output_text=None,
+                status="completed",
+                model="gpt-5.5",
+                usage=None,
+            )
+
+    agent.client = SimpleNamespace(
+        responses=SimpleNamespace(
+            create=lambda **kwargs: _FakeCreateStream(
+                [
+                    SimpleNamespace(type="response.output_item.done", item=output_item),
+                    SimpleNamespace(
+                        type="response.completed",
+                        response=SimpleNamespace(
+                            output=None,
+                            output_text=None,
+                            status="completed",
+                            model="gpt-5.5",
+                            usage=None,
+                        ),
+                    ),
+                ]
+            )
+        )
+    )
+
+    response = agent._run_codex_stream(_codex_request_kwargs())
+
+    assert response.output == [output_item]
+
+
+def test_codex_create_stream_fallback_backfills_none_final_output_from_done_item(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    output_item = {
+        "type": "message",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": "fallback item"}],
+    }
+
+    class _NullOutputFinalCreateStream:
+        def __iter__(self):
+            yield {"type": "response.output_item.done", "item": output_item}
+            yield {
+                "type": "response.completed",
+                "response": SimpleNamespace(
+                    output=None,
+                    output_text=None,
+                    status="completed",
+                    model="gpt-5.5",
+                    usage=None,
+                ),
+            }
+
+        def close(self):
+            pass
+
+    client = SimpleNamespace(
+        responses=SimpleNamespace(create=lambda **kwargs: _NullOutputFinalCreateStream())
+    )
+
+    response = agent._run_codex_create_stream_fallback(_codex_request_kwargs(), client=client)
+
+    assert response.output == [output_item]
+
+
+def test_run_codex_stream_does_not_synthesize_text_when_function_call_item_was_streamed(monkeypatch):
+    agent = _build_agent(monkeypatch)
+
+    class _NullOutputFunctionCallCreateStream:
+        def __iter__(self):
+            yield SimpleNamespace(type="response.output_text.delta", delta="ignore")
+            yield SimpleNamespace(
+                type="response.output_item.added",
+                item=SimpleNamespace(type="function_call"),
+            )
+
+        def close(self):
+            pass
+
+    agent.client = SimpleNamespace(
+        responses=SimpleNamespace(
+            create=lambda **kwargs: _NullOutputFunctionCallCreateStream(),
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="response.completed"):
+        agent._run_codex_stream(_codex_request_kwargs())
+
+
+def test_codex_create_stream_fallback_does_not_synthesize_text_when_function_call_item_was_streamed(monkeypatch):
+    agent = _build_agent(monkeypatch)
+
+    class _NullOutputFunctionCallCreateStream:
+        def __iter__(self):
+            yield {"type": "response.output_text.delta", "delta": "ignore"}
+            yield {
+                "type": "response.output_item.added",
+                "item": {"type": "function_call"},
+            }
+
+        def close(self):
+            pass
+
+    client = SimpleNamespace(
+        responses=SimpleNamespace(create=lambda **kwargs: _NullOutputFunctionCallCreateStream())
+    )
+
+    with pytest.raises(RuntimeError, match="response.completed"):
+        agent._run_codex_create_stream_fallback(_codex_request_kwargs(), client=client)

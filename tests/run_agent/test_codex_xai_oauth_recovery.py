@@ -2,15 +2,10 @@
 
 Three distinct failure modes the user community hit during rollout:
 
-1. ``RuntimeError("Expected to have received `response.created` before
-   `error`")`` on multi-turn xAI OAuth conversations.  The OpenAI SDK's
-   Responses streaming state machine collapses an upstream ``error`` SSE
-   frame into a generic stream-ordering error.  ``_run_codex_stream``
-   now treats this the same way it already treats the missing
-   ``response.completed`` postlude — fall back to a non-stream
-   ``responses.create(stream=True)`` which surfaces the real provider
-   error.  Also closes #8133 (``response.in_progress`` prelude on custom
-   relays) and #14634 (``codex.rate_limits`` prelude on codex-lb).
+1. Prelude stream ordering errors on multi-turn xAI OAuth conversations.
+   Hermes now reads the raw ``responses.create(stream=True)`` server-event
+   stream directly, so those events are no longer collapsed by the SDK's
+   higher-level ``responses.stream()`` state machine.
 
 2. The HTTP 403 entitlement error xAI returns when an OAuth token lacks
    SuperGrok / X Premium ("You have either run out of available
@@ -33,7 +28,7 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# Fix A: prelude error fallback
+# Fix A: raw Responses stream path
 # ---------------------------------------------------------------------------
 
 
@@ -64,21 +59,10 @@ def _make_codex_agent():
     ],
 )
 def test_codex_stream_prelude_error_falls_back_to_create_stream(prelude_event_type):
-    """The SDK's prelude RuntimeError must trigger the non-stream fallback.
-
-    When the first SSE event isn't ``response.created``, openai-python
-    raises RuntimeError before our event loop sees anything.  We must
-    detect that, retry once, then fall back to ``create(stream=True)``
-    which surfaces the real provider error or a real response.
-    """
+    """The high-level SDK stream parser should not be used for Codex turns."""
     agent = _make_codex_agent()
 
-    prelude_error = RuntimeError(
-        f"Expected to have received `response.created` before `{prelude_event_type}`"
-    )
-
     mock_client = MagicMock()
-    mock_client.responses.stream.side_effect = prelude_error
 
     fallback_response = SimpleNamespace(
         output=[SimpleNamespace(
@@ -94,34 +78,27 @@ def test_codex_stream_prelude_error_falls_back_to_create_stream(prelude_event_ty
         result = agent._run_codex_stream({}, client=mock_client)
 
     assert result is fallback_response
-    mock_fallback.assert_called_once_with({}, client=mock_client)
+    mock_fallback.assert_called_once_with({}, client=mock_client, on_first_delta=None)
+    mock_client.responses.stream.assert_not_called()
 
 
-def test_codex_stream_prelude_error_retries_once_before_fallback():
-    """The retry path must fire one extra stream attempt before falling back."""
+def test_codex_stream_missing_completed_retries_once_before_raising_or_recovering():
+    """The retry path still fires once when raw stream lacks response.completed."""
     agent = _make_codex_agent()
 
-    call_count = {"n": 0}
-
-    def stream_side_effect(**kwargs):
-        call_count["n"] += 1
-        raise RuntimeError(
-            "Expected to have received `response.created` before `error`"
-        )
-
     mock_client = MagicMock()
-    mock_client.responses.stream.side_effect = stream_side_effect
-
     fallback_response = SimpleNamespace(output=[], status="completed")
+
     with patch.object(
-        agent, "_run_codex_create_stream_fallback", return_value=fallback_response
+        agent,
+        "_run_codex_create_stream_fallback",
+        side_effect=[RuntimeError(
+            "Responses create(stream=True) raw stream did not emit response.completed terminal response."
+        ), fallback_response],
     ) as mock_fallback:
         agent._run_codex_stream({}, client=mock_client)
 
-    # max_stream_retries=1 → one retry + final attempt → 2 stream calls,
-    # THEN the fallback path runs.
-    assert call_count["n"] == 2
-    mock_fallback.assert_called_once()
+    assert mock_fallback.call_count == 2
 
 
 def test_codex_stream_unrelated_runtimeerror_still_raises():
@@ -129,13 +106,16 @@ def test_codex_stream_unrelated_runtimeerror_still_raises():
     agent = _make_codex_agent()
 
     mock_client = MagicMock()
-    mock_client.responses.stream.side_effect = RuntimeError("something else broke")
 
-    with patch.object(agent, "_run_codex_create_stream_fallback") as mock_fallback:
+    with patch.object(
+        agent,
+        "_run_codex_create_stream_fallback",
+        side_effect=RuntimeError("something else broke"),
+    ) as mock_fallback:
         with pytest.raises(RuntimeError, match="something else broke"):
             agent._run_codex_stream({}, client=mock_client)
 
-    mock_fallback.assert_not_called()
+    mock_fallback.assert_called_once()
 
 
 def test_codex_stream_postlude_error_still_falls_back():
@@ -143,18 +123,17 @@ def test_codex_stream_postlude_error_still_falls_back():
     agent = _make_codex_agent()
 
     mock_client = MagicMock()
-    mock_client.responses.stream.side_effect = RuntimeError(
-        "Didn't receive a `response.completed` event."
-    )
 
     fallback_response = SimpleNamespace(output=[], status="completed")
     with patch.object(
-        agent, "_run_codex_create_stream_fallback", return_value=fallback_response
+        agent,
+        "_run_codex_create_stream_fallback",
+        side_effect=[RuntimeError("Didn't receive a `response.completed` event."), fallback_response],
     ) as mock_fallback:
         result = agent._run_codex_stream({}, client=mock_client)
 
     assert result is fallback_response
-    mock_fallback.assert_called_once()
+    assert mock_fallback.call_count == 2
 
 
 # ---------------------------------------------------------------------------

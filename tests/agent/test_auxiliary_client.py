@@ -1864,12 +1864,10 @@ class TestCodexAdapterReasoningTranslation:
 
     @staticmethod
     def _build_adapter():
-        """Build a _CodexCompletionsAdapter with a mocked responses.stream()."""
+        """Build a _CodexCompletionsAdapter with a mocked raw Responses stream."""
         from agent.auxiliary_client import _CodexCompletionsAdapter
         from types import SimpleNamespace
 
-        # Mock the stream context manager: yields no events, get_final_response
-        # returns a minimal empty-output response.
         fake_final = SimpleNamespace(
             output=[SimpleNamespace(
                 type="message",
@@ -1879,19 +1877,18 @@ class TestCodexAdapterReasoningTranslation:
         )
 
         class _FakeStream:
-            def __enter__(self): return self
-            def __exit__(self, *a): return False
-            def __iter__(self): return iter([])
-            def get_final_response(self): return fake_final
+            def __iter__(self):
+                return iter([SimpleNamespace(type="response.completed", response=fake_final)])
+            def close(self): pass
 
         captured_kwargs = {}
 
-        def _stream(**kwargs):
+        def _create(**kwargs):
             captured_kwargs.update(kwargs)
             return _FakeStream()
 
         real_client = MagicMock()
-        real_client.responses.stream = _stream
+        real_client.responses.create = _create
         adapter = _CodexCompletionsAdapter(real_client, "gpt-5.3-codex")
         return adapter, captured_kwargs
 
@@ -2118,31 +2115,26 @@ class TestVisionAutoSkipsKimiCoding:
 
 
 class TestCodexAuxiliaryAdapterTimeout:
-    def test_forwards_timeout_to_responses_stream(self):
+    def test_forwards_timeout_to_raw_responses_stream(self):
         class FakeStream:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, tb):
-                return False
-
             def __iter__(self):
-                return iter(())
-
-            def get_final_response(self):
-                return SimpleNamespace(
+                final = SimpleNamespace(
                     output=[SimpleNamespace(
                         type="message",
                         content=[SimpleNamespace(type="output_text", text="summary")],
                     )],
                     usage=None,
                 )
+                return iter([SimpleNamespace(type="response.completed", response=final)])
+
+            def close(self):
+                pass
 
         class FakeResponses:
             def __init__(self):
                 self.kwargs = None
 
-            def stream(self, **kwargs):
+            def create(self, **kwargs):
                 self.kwargs = kwargs
                 return FakeStream()
 
@@ -2155,32 +2147,21 @@ class TestCodexAuxiliaryAdapterTimeout:
         )
 
         assert fake_client.responses.kwargs["timeout"] == 12.5
+        assert fake_client.responses.kwargs["stream"] is True
         assert response.choices[0].message.content == "summary"
 
     def test_enforces_total_timeout_while_stream_keeps_emitting_events(self):
         class SlowAliveStream:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, tb):
-                return False
-
             def __iter__(self):
                 for _ in range(5):
                     time.sleep(0.03)
                     yield SimpleNamespace(type="response.in_progress")
 
-            def get_final_response(self):
-                return SimpleNamespace(
-                    output=[SimpleNamespace(
-                        type="message",
-                        content=[SimpleNamespace(type="output_text", text="late")],
-                    )],
-                    usage=None,
-                )
+            def close(self):
+                pass
 
         class FakeResponses:
-            def stream(self, **kwargs):
+            def create(self, **kwargs):
                 return SlowAliveStream()
 
         fake_client = SimpleNamespace(responses=FakeResponses(), close=lambda: None)
@@ -2236,7 +2217,7 @@ class TestAuxiliaryClientPoisonedCacheEviction:
         )
 
         real = SimpleNamespace(api_key="k", base_url="https://chatgpt.com/backend-api/codex",
-                               responses=SimpleNamespace(stream=lambda **k: None),
+                               responses=SimpleNamespace(create=lambda **k: None),
                                close=lambda: None)
         wrapper = CodexAuxiliaryClient(real, "gpt-5.5")
         with _client_cache_lock:
@@ -2274,7 +2255,7 @@ class TestAuxiliaryClientPoisonedCacheEviction:
         )
 
         real = SimpleNamespace(api_key="k", base_url="https://chatgpt.com/backend-api/codex",
-                               responses=SimpleNamespace(stream=lambda **k: None),
+                               responses=SimpleNamespace(create=lambda **k: None),
                                close=lambda: None)
         sync_wrapper = CodexAuxiliaryClient(real, "gpt-5.5")
         async_wrapper = AsyncCodexAuxiliaryClient(sync_wrapper)
@@ -2318,7 +2299,7 @@ class TestAuxiliaryClientPoisonedCacheEviction:
 
         class FakeClient:
             def __init__(self):
-                self.responses = SimpleNamespace(stream=lambda **k: SlowAliveStream())
+                self.responses = SimpleNamespace(create=lambda **k: SlowAliveStream())
                 self.api_key = "k"
                 self.base_url = "https://chatgpt.com/backend-api/codex"
 
@@ -2808,3 +2789,101 @@ class TestAuxUnhealthyCache:
             )
             # After the 402, OpenRouter is in the unhealthy cache.
             assert _is_provider_unhealthy("openrouter") is True
+
+
+class TestCodexAuxiliaryNullOutputRecovery:
+    def test_recovers_output_item_when_raw_stream_ends_without_terminal_response(self):
+        output_item = SimpleNamespace(
+            type="message",
+            role="assistant",
+            status="completed",
+            content=[SimpleNamespace(type="output_text", text="aux recovered")],
+        )
+
+        class _NoTerminalRawStream:
+            def __iter__(self):
+                yield SimpleNamespace(type="response.output_item.done", item=output_item)
+
+            def close(self):
+                pass
+
+        client = SimpleNamespace(
+            responses=SimpleNamespace(create=lambda **kwargs: _NoTerminalRawStream())
+        )
+        adapter = _CodexCompletionsAdapter(client, "gpt-5.5")
+
+        response = adapter.create(messages=[{"role": "user", "content": "hi"}])
+
+        assert response.choices[0].message.content == "aux recovered"
+        assert response.choices[0].finish_reason == "stop"
+
+    def test_backfills_none_final_output_from_streamed_item(self):
+        output_item = SimpleNamespace(
+            type="message",
+            role="assistant",
+            status="completed",
+            content=[SimpleNamespace(type="output_text", text="aux final item")],
+        )
+
+        class _NullOutputFinalStream:
+            def __iter__(self):
+                yield SimpleNamespace(type="response.output_item.done", item=output_item)
+                yield SimpleNamespace(
+                    type="response.completed",
+                    response=SimpleNamespace(
+                        output=None,
+                        output_text=None,
+                        status="completed",
+                        model="gpt-5.5",
+                        usage=None,
+                    ),
+                )
+
+            def close(self):
+                pass
+
+        client = SimpleNamespace(
+            responses=SimpleNamespace(create=lambda **kwargs: _NullOutputFinalStream())
+        )
+        adapter = _CodexCompletionsAdapter(client, "gpt-5.5")
+
+        response = adapter.create(messages=[{"role": "user", "content": "hi"}])
+
+        assert response.choices[0].message.content == "aux final item"
+        assert response.choices[0].finish_reason == "stop"
+
+    def test_recovers_text_deltas_when_raw_stream_ends_without_terminal_response(self):
+        class _NoTerminalRawStream:
+            def __iter__(self):
+                yield SimpleNamespace(type="response.output_text.delta", delta="aux ")
+                yield SimpleNamespace(type="response.output_text.delta", delta="text")
+
+            def close(self):
+                pass
+
+        client = SimpleNamespace(
+            responses=SimpleNamespace(create=lambda **kwargs: _NoTerminalRawStream())
+        )
+        adapter = _CodexCompletionsAdapter(client, "gpt-5.5")
+
+        response = adapter.create(messages=[{"role": "user", "content": "hi"}])
+
+        assert response.choices[0].message.content == "aux text"
+        assert response.choices[0].finish_reason == "stop"
+
+    def test_does_not_synthesize_text_deltas_when_function_call_was_streamed(self):
+        class _NoTerminalRawStream:
+            def __iter__(self):
+                yield SimpleNamespace(type="response.output_text.delta", delta="ignore me")
+                yield SimpleNamespace(type="response.output_item.added", item=SimpleNamespace(type="function_call"))
+
+            def close(self):
+                pass
+
+        client = SimpleNamespace(
+            responses=SimpleNamespace(create=lambda **kwargs: _NoTerminalRawStream())
+        )
+        adapter = _CodexCompletionsAdapter(client, "gpt-5.5")
+
+        with pytest.raises(RuntimeError, match="terminal response"):
+            adapter.create(messages=[{"role": "user", "content": "hi"}])
