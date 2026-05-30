@@ -855,10 +855,10 @@ PLATFORM_HINTS = {
     "email": (
         "You are communicating via email. Write clear, well-structured responses "
         "suitable for email. Use plain text formatting (no markdown). "
-        "Keep responses concise but complete. You can send file attachments — "
-        "include MEDIA:/absolute/path/to/file in your response. The subject line "
-        "is preserved for threading. Do not include greetings or sign-offs unless "
-        "contextually appropriate."
+        "Keep responses concise but complete. You can send file attachments by "
+        "calling the send_attachment tool with an absolute local path. The subject "
+        "line is preserved for threading. Do not include greetings or sign-offs "
+        "unless contextually appropriate."
     ),
     "cron": (
         "You are running as a scheduled cron job. There is no user present — you "
@@ -931,17 +931,16 @@ PLATFORM_HINTS = {
     "bluebubbles": (
         "You are chatting via iMessage (BlueBubbles). iMessage does not render "
         "markdown formatting — use plain text. Keep responses concise as they "
-        "appear as text messages. You can send media files natively: include "
-        "MEDIA:/absolute/path/to/file in your response. Images (.jpg, .png, "
-        ".heic) appear as photos and other files arrive as attachments."
+        "appear as text messages. You can send media files natively by calling "
+        "send_attachment with an absolute local path. Images (.jpg, .png, .heic) "
+        "appear as photos and other files arrive as attachments."
     ),
     "mattermost": (
         "You are in a Mattermost workspace communicating with your user. "
         "Mattermost renders standard Markdown — headings, bold, italic, code "
-        "blocks, and tables all work. "
-        "You can send media files natively: include MEDIA:/absolute/path/to/file "
-        "in your response. Images (.jpg, .png, .webp) are uploaded as photo "
-        "attachments, audio and video as file attachments. "
+        "blocks, and tables all work. You can send media files natively by "
+        "calling send_attachment with an absolute local path. Images (.jpg, .png, "
+        ".webp) are uploaded as photo attachments, audio and video as file attachments. "
         "Image URLs in markdown format ![alt](url) are rendered as inline previews automatically."
     ),
     "matrix": (
@@ -966,12 +965,11 @@ PLATFORM_HINTS = {
         "attachments), and other files as attachments."
     ),
     "weixin": (
-        "You are on Weixin/WeChat. Markdown formatting is supported, so you may use it when "
-        "it improves readability, but keep the message compact and chat-friendly. You can send media files natively: "
-        "include MEDIA:/absolute/path/to/file in your response. Images are sent as native "
-        "photos, videos play inline when supported, and other files arrive as downloadable "
-        "documents. You can also include image URLs in markdown format ![alt](url) and they "
-        "will be downloaded and sent as native media when possible."
+        "You are on Weixin/WeChat. Markdown formatting is supported, so you may use "
+        "it when it improves readability, but keep the message compact and chat-friendly. "
+        "You can send media files natively by calling send_attachment with an absolute "
+        "local path. Images are sent as native photos, videos play inline when supported, "
+        "and other files arrive as downloadable documents."
     ),
     "wecom": (
         "You are on WeCom (\u4f01\u4e1a\u5fae\u4fe1). Markdown is supported. "
@@ -983,10 +981,10 @@ PLATFORM_HINTS = {
         "photos. Never claim you lack file-sending."
     ),
     "qqbot": (
-        "You are on QQ, a popular Chinese messaging platform. QQ supports markdown formatting "
-        "and emoji. You can send media files natively: include MEDIA:/absolute/path/to/file in "
-        "your response. Images are sent as native photos, and other files arrive as downloadable "
-        "documents."
+        "You are on QQ, a popular Chinese messaging platform. QQ supports markdown "
+        "formatting and emoji. You can send media files natively by calling "
+        "send_attachment with an absolute local path. Images are sent as native photos, "
+        "and other files arrive as downloadable documents."
     ),
     "yuanbao": (
         "You are on Yuanbao (\u817e\u8baf\u5143\u5b9d), a Chinese AI assistant "

@@ -2887,7 +2887,7 @@ BROWSER_TOOL_SCHEMAS = [
     },
     {
         "name": "browser_vision",
-        "description": "Take a screenshot of the current page so you can inspect it visually. Use this when you need to understand what the page looks like - especially for CAPTCHAs, visual verification challenges, complex layouts, or cases where the text snapshot misses important visual information. When your active model has native vision, the screenshot is attached to your context directly and you inspect it on the next turn; otherwise Hermes falls back to an auxiliary vision model and returns a text analysis. Includes a screenshot_path that you can share with the user by including MEDIA:<screenshot_path> in your response. Requires browser_navigate to be called first.",
+        "description": "Take a screenshot of the current page and analyze it with vision AI. Use this when you need to visually understand what's on the page - especially useful for CAPTCHAs, visual verification challenges, complex layouts, or when the text snapshot doesn't capture important visual information. Returns both the AI analysis and a screenshot_path that you can share with the user by calling send_attachment with path=screenshot_path. Requires browser_navigate to be called first.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -5420,8 +5420,8 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
     for visual content the text-based snapshot may not capture (CAPTCHAs,
     verification challenges, images, complex layouts, etc.).
 
-    The screenshot is saved persistently and its file path is returned so it
-    can be shared with users via MEDIA:<path> in the response.
+    The screenshot is saved persistently and its file path is returned alongside
+    the analysis, so it can be shared with users via send_attachment.
 
     Args:
         question: What you want to know about the page visually
@@ -5736,7 +5736,7 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
         error_info = {"success": False, "error": f"Error during vision analysis: {str(e)}"}
         if screenshot_path.exists():
             error_info["screenshot_path"] = str(screenshot_path)
-            error_info["note"] = "Screenshot was captured but vision analysis failed. You can still share it via MEDIA:<path>."
+            error_info["note"] = "Screenshot was captured but vision analysis failed. You can still share it by calling send_attachment with path=screenshot_path."
         _copy_fallback_warning(error_info, result if 'result' in locals() else {})
         return json.dumps(error_info, ensure_ascii=False)
 

@@ -2019,26 +2019,15 @@ class GatewayStreamConsumer:
             except Exception:
                 pass
 
-    # Strip MEDIA:<path> tags before display. Uses the shared anchored
-    # MEDIA_TAG_CLEANUP_RE from gateway/platforms/base.py — only tags whose
-    # path ends in a deliverable extension are removed, so an unknown-extension
-    # path stays visible instead of being silently dropped (issue #34517).
-    # Streaming and non-streaming paths share the same regex, so a tag is
-    # treated identically whichever path delivered the text.
-    _MEDIA_RE = MEDIA_TAG_CLEANUP_RE
-
     @staticmethod
     def _clean_for_display(text: str) -> str:
-        """Strip MEDIA: directives and internal markers from text before display.
+        """Return streamed text unchanged.
 
-        The streaming path delivers raw text chunks that may include
-        ``MEDIA:<path>`` tags and ``[[audio_as_voice]]`` directives meant for
-        the platform adapter's post-processing.  The actual media files are
-        delivered separately via ``_deliver_media_from_response()`` after the
-        stream finishes — we just need to hide the raw directives from the
-        user.
+        Attachment delivery is explicit via the ``send_attachment`` tool; the
+        streaming renderer must not treat ``MEDIA:`` or bracketed directives as
+        hidden control syntax.
         """
-        return _BasePlatformAdapter.strip_media_directives_for_display(text)
+        return text
 
     async def _send_new_chunk(
         self,
@@ -3011,9 +3000,8 @@ class GatewayStreamConsumer:
         ``finalize`` is True when this is the last edit in a streaming
         sequence.
         """
-        # Strip MEDIA: directives so they don't appear as visible text.
-        # Media files are delivered as native attachments after the stream
-        # finishes (via _deliver_media_from_response in gateway/run.py).
+        # Attachment delivery is explicit via send_attachment; do not strip
+        # file-delivery-looking text from streamed messages.
         text = self._clean_for_display(text)
         # Preserve the pre-fence-closed form for stream-is-the-message draft
         # frames: appending a closing ``` to a mid-code-block frame makes

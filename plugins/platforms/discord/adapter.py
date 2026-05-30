@@ -3960,6 +3960,33 @@ class DiscordAdapter(BasePlatformAdapter):
             continuation_message_ids=tuple(continuation_ids),
         )
 
+    async def delete_message(
+        self,
+        chat_id: str,
+        message_id: str,
+    ) -> bool:
+        """Delete a previously sent Discord message."""
+        if not self._client:
+            return False
+        try:
+            channel = self._client.get_channel(int(chat_id))
+            if not channel:
+                channel = await self._client.fetch_channel(int(chat_id))
+            if not channel:
+                return False
+            msg = await channel.fetch_message(int(message_id))
+            await msg.delete()
+            return True
+        except Exception as e:  # pragma: no cover - defensive logging
+            logger.debug(
+                "[%s] Failed to delete Discord message %s in %s: %s",
+                self.name,
+                message_id,
+                chat_id,
+                e,
+            )
+            return False
+
     async def _send_file_attachment(
         self,
         chat_id: str,

@@ -465,9 +465,8 @@ async def _handle_yb_send_dm(args, **kw):
         elif isinstance(item, (list, tuple)) and len(item) >= 2:
             media_files.append((str(item[0]), bool(item[1])))
 
-    # Extract MEDIA:<path> tags embedded in the message text (LLM often puts
-    # file paths there instead of using the media_files parameter).
     message = args.get("message", "")
+    # Extract MEDIA:<path> tags embedded in the message text.
     from gateway.platforms.base import BasePlatformAdapter
     embedded_media, message = BasePlatformAdapter.extract_media(message)
     if embedded_media:

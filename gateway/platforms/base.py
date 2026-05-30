@@ -6588,11 +6588,6 @@ class BasePlatformAdapter(ABC):
 
                 # Extract image URLs and send them as native platform attachments
                 images, text_content = self.extract_images(response)
-                # Strip any remaining internal directives from message body (fixes #1561).
-                # _strip_media_directives shares MEDIA_TAG_CLEANUP_RE, so a MEDIA: tag
-                # with an unknown extension is intentionally left in the body for
-                # extract_local_files below to pick up rather than silently dropped (#34517).
-                text_content = _strip_media_directives(text_content).strip()
                 if images:
                     logger.info("[%s] extract_images found %d image(s) in response (%d chars)", self.name, len(images), len(response))
 
@@ -6905,11 +6900,9 @@ class BasePlatformAdapter(ABC):
                 _IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}
 
                 # Partition images out of media_files + local_files so they
-                # can be sent as a single batch (Signal RPC). When
-                # ``[[as_document]]`` was set on the original response, image
-                # files skip the photo path and route to send_document below
-                # so they're delivered with original bytes (no Telegram
-                # sendPhoto recompression).
+                # can be sent as a single batch. When ``[[as_document]]`` was
+                # set on the original response, image files skip the photo path
+                # and route to send_document below so original bytes survive.
                 from urllib.parse import quote as _quote
                 _image_paths: list = []
                 _non_image_media: list = []
@@ -6921,6 +6914,7 @@ class BasePlatformAdapter(ABC):
                         _image_paths.append(media_path)
                     else:
                         _non_image_media.append((media_path, is_voice))
+
                 _non_image_local: list = []
                 for file_path in local_files:
                     if (Path(file_path).suffix.lower() in _IMAGE_EXTS
@@ -6989,7 +6983,6 @@ class BasePlatformAdapter(ABC):
                     except Exception as media_err:
                         logger.warning("[%s] Error sending media: %s", self.name, media_err)
 
-                # Send auto-detected local non-image files as native attachments
                 for file_path in _non_image_local:
                     if human_delay > 0:
                         await asyncio.sleep(human_delay)
@@ -7482,6 +7475,11 @@ class BasePlatformAdapter(ABC):
         """
         return content
     
+    @staticmethod
+    def _adjust_split_away_from_special_marker(text: str, split_at: int) -> int:
+        """Return split_at unchanged; response text has no control markers."""
+        return split_at
+
     @staticmethod
     def truncate_message(
         content: str,

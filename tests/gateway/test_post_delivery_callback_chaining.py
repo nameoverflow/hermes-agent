@@ -68,6 +68,27 @@ class TestPostDeliveryCallbackChaining:
         _invoke(cb)
         assert fired == ["A", "B"]
 
+    @pytest.mark.asyncio
+    async def test_chained_async_callback_is_returned_for_awaiting(self, adapter):
+        """Async post-delivery callbacks are awaited by the gateway finalizer.
+
+        Temporary-progress cleanup returns a coroutine so the finalizer can
+        delete bubbles before shutdown/restart drains the event loop.
+        """
+        fired = []
+
+        async def async_cb():
+            await asyncio.sleep(0)
+            fired.append("async")
+
+        adapter.register_post_delivery_callback("s", lambda: fired.append("sync"))
+        adapter.register_post_delivery_callback("s", async_cb)
+        cb = adapter.pop_post_delivery_callback("s")
+        result = cb()
+        assert inspect.isawaitable(result)
+        await result
+        assert fired == ["sync", "async"]
+
     def test_three_callbacks_chain_in_order(self, adapter):
         """Chain composes over an already-chained callback."""
         fired = []
