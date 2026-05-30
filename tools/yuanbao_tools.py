@@ -466,11 +466,7 @@ async def _handle_yb_send_dm(args, **kw):
             media_files.append((str(item[0]), bool(item[1])))
 
     message = args.get("message", "")
-    # Extract MEDIA:<path> tags embedded in the message text.
     from gateway.platforms.base import BasePlatformAdapter
-    embedded_media, message = BasePlatformAdapter.extract_media(message)
-    if embedded_media:
-        media_files.extend(embedded_media)
     media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
 
     return tool_result(await send_dm(

@@ -55,9 +55,7 @@ _VALID_MODES = frozenset({"auto", "native", "text"})
 
 # Image extensions used by extract_image_refs(). Kept tight on purpose — we
 # only auto-attach things the model can actually see. Documents/archives are
-# excluded because the gateway's broader extract_local_files() also routes
-# them differently (send_document), and we don't want to attach a PDF as a
-# vision part.
+# excluded because they are not useful vision parts.
 _IMAGE_EXTS = (
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif", ".heic",
 )

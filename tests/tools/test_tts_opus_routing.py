@@ -40,7 +40,7 @@ def test_edge_cli_preserves_native_mp3(tmp_path, monkeypatch):
     assert result["success"] is True
     assert result["file_path"] == str(out)
     assert result["voice_compatible"] is False
-    assert result["media_tag"] == f"MEDIA:{out}"
+    assert "media_tag" not in result
     convert.assert_not_called()
 
 
@@ -66,7 +66,7 @@ def test_edge_telegram_converts_to_opus_voice(tmp_path, monkeypatch):
     assert result["success"] is True
     assert result["file_path"] == str(opus)
     assert result["voice_compatible"] is True
-    assert result["media_tag"] == f"[[audio_as_voice]]\nMEDIA:{opus}"
+    assert "media_tag" not in result
     convert.assert_called_once_with(str(out))
 
 
