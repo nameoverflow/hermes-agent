@@ -1,0 +1,9 @@
+name: kling
+version: 1.0.0
+description: "Kling direct API video generation backend. Calls Kling /v1/videos/omni-video with kling-v3-omni in pro mode; no FAL.ai proxy."
+author: NousResearch
+kind: backend
+# Credentials are configured through the provider setup hook because Kling
+# accepts either KLING_TOKEN or the KLING_ACCESS_KEY_ID/KLING_SECRET_ACCESS_KEY
+# pair. The generic requires_env manifest shape cannot express alternatives.
+requires_env: []

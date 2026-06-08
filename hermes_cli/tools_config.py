@@ -2344,6 +2344,47 @@ def _run_post_setup(post_setup_key: str):
         _print_info("    Restart Hermes for tracing to take effect.")
         _print_info("    Verify: hermes plugins list")
 
+    elif post_setup_key == "kling":
+        existing_token = get_env_value("KLING_TOKEN")
+        existing_ak = get_env_value("KLING_ACCESS_KEY_ID")
+        existing_sk = get_env_value("KLING_SECRET_ACCESS_KEY")
+        if existing_token:
+            _print_success("    Kling will use your existing KLING_TOKEN")
+            return
+        if existing_ak and existing_sk:
+            _print_success("    Kling will use your existing KLING_ACCESS_KEY_ID / KLING_SECRET_ACCESS_KEY")
+            return
+
+        _print_info("    Kling needs credentials. Choose one:")
+        _print_info("    API key page: https://kling.ai/dev/api-key")
+        idx = _prompt_choice(
+            "    How do you want Kling to authenticate?",
+            [
+                "Paste a session Bearer token (KLING_TOKEN)",
+                "Paste access_key_id + secret_access_key (recommended for API keys)",
+                "Skip — configure later via `hermes config edit` or ~/.hermes/.env",
+            ],
+            default=1,
+        )
+        if idx == 0:
+            token = _prompt("    Kling Bearer token", password=True)
+            if token and token.strip():
+                save_env_value("KLING_TOKEN", token.strip())
+                _print_success("    KLING_TOKEN saved")
+            else:
+                _print_warning("    No token provided. Kling will remain inactive until credentials are configured.")
+        elif idx == 1:
+            ak = _prompt("    Kling access_key_id", password=True)
+            sk = _prompt("    Kling secret_access_key", password=True)
+            if ak and ak.strip() and sk and sk.strip():
+                save_env_value("KLING_ACCESS_KEY_ID", ak.strip())
+                save_env_value("KLING_SECRET_ACCESS_KEY", sk.strip())
+                _print_success("    Kling AK/SK saved")
+            else:
+                _print_warning("    Incomplete AK/SK. Kling will remain inactive until both values are configured.")
+        else:
+            _print_info("    Kling will remain inactive until credentials are configured.")
+
     elif post_setup_key == "xai_grok":
         # Shared credential bootstrap for any picker entry that talks to xAI
         # (TTS, Video Gen, future Image Gen, etc.). Accepts either a
@@ -2374,7 +2415,6 @@ def _run_post_setup(post_setup_key: str):
                 prompt_choice,
                 prompt as _setup_prompt,
             )
-            from hermes_cli.config import save_env_value
         except Exception as exc:
             _print_warning(f"    Could not load setup helpers: {exc}")
             _print_info("    Run later: hermes auth add xai-oauth   (or set XAI_API_KEY)")

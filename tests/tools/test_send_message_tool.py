@@ -313,8 +313,6 @@ class TestSendMessageTool:
             "alerts-channel",
             "done",
             thread_id=None,
-            media_files=[],
-            force_document=False,
         )
 
 
