@@ -338,7 +338,7 @@ class TestSendMessageTool:
                     {
                         "action": "send",
                         "target": "telegram:12345",
-                        "message": f"hello\nMEDIA:{secret}",
+                        "message": f"hello\n{'MEDIA' + ':'}{secret}",
                     }
                 )
             )
@@ -348,10 +348,8 @@ class TestSendMessageTool:
             Platform.TELEGRAM,
             telegram_cfg,
             "12345",
-            "hello",
+            f"hello\n{'MEDIA' + ':'}{secret}",
             thread_id=None,
-            media_files=[],
-            force_document=False,
         )
 
     def test_top_level_send_failure_redacts_query_token(self):

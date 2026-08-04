@@ -2109,6 +2109,10 @@ def _collect_auto_append_media_tags(
     ``history_media_paths`` for dedup, preserving the compression-safe behaviour
     of #160. The producer-tool allowlist still applies on the fallback path.
     """
+    # Attachment delivery is explicit via send_attachment. Tool output and
+    # assistant text must never be converted into an implicit delivery marker.
+    return [], False
+
     history_media_paths = history_media_paths or set()
     # Only trust the slice boundary when the message list still contains the
     # full history prefix. Otherwise scan everything (compression-safe fallback).
@@ -24208,6 +24212,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         from pathlib import Path
         from urllib.parse import quote as _quote
 
+        # Attachment delivery is explicit via send_attachment. Streaming text
+        # is never scanned for local paths or control strings.
+        return None
+
         try:
             # Capture [[as_document]] before extract_media strips it, so the
             # dispatch partition below can route image-extension files
@@ -24554,20 +24562,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if not response and result and result.get("error"):
                 response = f"Error: {result['error']}"
 
-            # Background tasks start a fresh conversation (no prior history),
-            # so history_offset=0: every message in the run belongs to this
-            # turn. Mirrors the repair on the main turn path.
+            # Local attachments are explicit via send_attachment. Only remote
+            # markdown images are extracted from background-task text.
             if response:
-                response = repair_explicit_computer_use_media_paths(
-                    response,
-                    result.get("messages", []),
-                )
-
-            # Extract media files from the response
-            if response:
-                media_files, response = adapter.extract_media(response)
-                from gateway.platforms.base import BasePlatformAdapter
-                media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
+                media_files = []
                 images, text_content = adapter.extract_images(response)
 
                 preview = prompt[:60] + ("..." if len(prompt) > 60 else "")

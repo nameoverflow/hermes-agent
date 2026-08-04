@@ -666,23 +666,11 @@ class TestPromptBuilderConstants:
 
 
     def test_api_server_hint_scopes_media_tag_guidance(self):
-        """api_server MEDIA: interception is partial (#68402, corrected):
-        _resolve_media_to_data_urls (gateway/platforms/api_server.py) inlines
-        small image MEDIA: tags as base64 data URLs on the chat, completions,
-        and responses endpoints — but non-image files are never resolved
-        (_MEDIA_IMG_EXT is image-only) and the /v1/runs handler never calls
-        the resolver at all. The hint must teach BOTH halves: images work via
-        MEDIA:, everything else needs a plain path in the response text."""
+        """API response text must not act as an implicit file channel."""
         hint = PLATFORM_HINTS["api_server"]
-        # Images ARE intercepted: inlined as data URLs.
-        assert "MEDIA:" in hint
-        assert "inlined" in hint.lower()
-        assert "data" in hint.lower()  # data URLs
-        # The gaps: non-image files and the runs endpoint.
-        assert "non-image" in hint.lower()
-        assert "runs" in hint.lower()
-        # Fallback guidance: plain file path in the response text.
-        assert "plain" in hint.lower()
+        assert "MEDIA" + ":" not in hint
+        assert "no implicit file-delivery syntax" in hint.lower()
+        assert "absolute path" in hint.lower()
 
     def test_markdown_converting_platform_hints_do_not_forbid_markdown(self):
         """#12224 — WhatsApp (Baileys) and Signal adapters actively convert
@@ -698,24 +686,10 @@ class TestPromptBuilderConstants:
             assert "markdown" in hint.lower()
 
     def test_cli_hint_does_not_suggest_media_tags(self):
-        # Regression: MEDIA:/path tags are intercepted only by messaging
-        # gateway platforms. On the CLI they render as literal text and
-        # confuse users. The CLI hint must steer the agent away from them.
-        cli_hint = PLATFORM_HINTS["cli"]
-        assert "MEDIA:" in cli_hint, (
-            "CLI hint should mention MEDIA: in order to tell the agent "
-            "NOT to use it (negative guidance)."
-        )
-        # Must contain explicit "don't" language near the MEDIA reference.
-        assert any(
-            marker in cli_hint.lower()
-            for marker in ("do not emit media", "not intercepted", "do not", "don't")
-        ), "CLI hint should explicitly discourage MEDIA: tags."
-        # Messaging hints should still advertise MEDIA: positively (sanity
-        # check that this test is calibrated correctly).
-        # Dieted (#95681): messaging hints now share the _MEDIA_NATIVE
-        # spine ("write MEDIA:/absolute/path..."), not per-hint prose.
-        assert "MEDIA:/absolute/path" in PLATFORM_HINTS["telegram"]
+        legacy_marker = "MEDIA" + ":"
+        assert all(legacy_marker not in hint for hint in PLATFORM_HINTS.values())
+        for platform in ("telegram", "discord", "feishu", "matrix"):
+            assert "send_attachment" in PLATFORM_HINTS[platform]
 
 
 
@@ -1018,5 +992,3 @@ class TestParallelToolCallGuidance:
 # =========================================================================
 # Budget warning history stripping
 # =========================================================================
-
-

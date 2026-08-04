@@ -1342,10 +1342,6 @@ _SMALL_CTX_THRESHOLD_PERCENT = 0.75
 
 _PATH_MENTION_RE = re.compile(r"(?:/|~/?|[A-Za-z]:\\)[^\s`'\")\]}<>]+")
 
-# MEDIA delivery directives must not reach the summarizer — if one leaks into
-# the summary, the downstream model may re-emit it as an active directive on
-# the next turn, triggering bogus attachment sends (#14665).
-_MEDIA_DIRECTIVE_RE = re.compile(r"MEDIA:\S+")
 _HISTORICAL_TASK_SECTION_RE = re.compile(
     rf"(?ms)^{re.escape(HISTORICAL_TASK_HEADING)}\s*\n.*?(?=^## |\Z)"
 )
@@ -4473,7 +4469,6 @@ class ContextCompressor(ContextEngine):
                         text_parts.append(part)
                 content = "\n".join(text_parts)
             content = _redact_compaction_text(content or "")
-            content = _MEDIA_DIRECTIVE_RE.sub("[media attachment]", content)
             # Strip inline reasoning blocks (<think>, <reasoning>, etc.) from
             # assistant content before it reaches the summarizer. Reasoning
             # traces are transient scratch work — feeding them to the aux

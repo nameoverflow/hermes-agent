@@ -43,7 +43,7 @@ class TestCleanForDisplay:
         result = GatewayStreamConsumer._clean_for_display(
             "Result: 'MEDIA:/path/file.png'"
         )
-        assert "MEDIA:" not in result
+        assert result == "Result: 'MEDIA:/path/file.png'"
 
     def test_media_tag_double_quoted_json_context_stays_visible(self):
         """A double-quoted tag preceded by a colon sits in a JSON value
@@ -69,8 +69,7 @@ class TestCleanForDisplay:
         """[[audio_as_voice]] directive is removed."""
         text = "[[audio_as_voice]]\nMEDIA:/tmp/voice.ogg"
         result = GatewayStreamConsumer._clean_for_display(text)
-        assert "[[audio_as_voice]]" not in result
-        assert "MEDIA:" not in result
+        assert result == text
 
 
 # ── Integration: _send_or_edit strips MEDIA: ─────────────────────────────
@@ -174,8 +173,7 @@ class TestSendOrEditMediaStripping:
 
         adapter.send.assert_called_once()
         sent_text = adapter.send.call_args[1]["content"]
-        assert "MEDIA:" not in sent_text
-        assert "Here is your image" in sent_text
+        assert sent_text == "Here is your image\nMEDIA:/tmp/test.png"
 
     @pytest.mark.asyncio
     async def test_edit_strips_media(self):
@@ -195,7 +193,7 @@ class TestSendOrEditMediaStripping:
 
         adapter.edit_message.assert_called_once()
         edited_text = adapter.edit_message.call_args[1]["content"]
-        assert "MEDIA:" not in edited_text
+        assert edited_text == "Here is the result\nMEDIA:/tmp/image.png"
 
 
     @pytest.mark.asyncio
@@ -262,8 +260,7 @@ class TestStreamRunMediaStripping:
         for call in adapter.edit_message.call_args_list:
             all_calls.append(call[1].get("content", ""))
 
-        for sent_text in all_calls:
-            assert "MEDIA:" not in sent_text, f"MEDIA: leaked into display: {sent_text!r}"
+        assert any("MEDIA:/home/user/.hermes/cache/images/abc123.png" in sent_text for sent_text in all_calls)
 
         assert consumer.already_sent
 
@@ -1487,4 +1484,3 @@ class TestFlushPendingSync:
 
         consumer.finish()
         await task
-

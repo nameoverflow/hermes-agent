@@ -5170,6 +5170,10 @@ class BasePlatformAdapter(ABC):
         Returns:
             Tuple of (list of (path, is_voice) pairs, cleaned content with tags removed).
         """
+        # Attachment delivery is explicit via send_attachment. Legacy-looking
+        # strings remain ordinary user-visible text.
+        return [], content
+
         media = []
         cleaned = content
 
@@ -5270,6 +5274,9 @@ class BasePlatformAdapter(ABC):
         ``validate_media_delivery_path`` accepts the path so undeliverable
         paths stay visible for debugging.
         """
+        # Display text is never parsed as an attachment control channel.
+        return text
+
         if (
             "MEDIA:" not in text
             and "[[audio_as_voice]]" not in text
@@ -5305,6 +5312,10 @@ class BasePlatformAdapter(ABC):
             Tuple of (list of expanded file paths, cleaned text with the
             raw path strings removed).
         """
+        # Bare local paths remain ordinary text. Native delivery requires an
+        # explicit send_attachment call.
+        return [], content
+
         _LOCAL_MEDIA_EXTS = MEDIA_DELIVERY_EXTS
         ext_part = '|'.join(e.lstrip('.') for e in _LOCAL_MEDIA_EXTS)
 
@@ -6572,60 +6583,20 @@ class BasePlatformAdapter(ABC):
             if not response:
                 logger.debug("[%s] Handler returned empty/None response for %s", self.name, event.source.chat_id)
             if response:
-                # Capture [[as_document]] before extract_media strips it, so the
-                # dispatch partition below can route image-extension files
-                # through send_document instead of send_multiple_images. Used
-                # by skills that produce large/lossless images (e.g. info-graph)
-                # where Telegram's sendPhoto recompression destroys legibility.
-                force_document_attachments = "[[as_document]]" in response
-
-                # Pre-extract snapshot for the #29346 recovery/invariant below.
+                # Attachment delivery is explicit via send_attachment. Response
+                # text is never interpreted as a local-file control channel.
+                force_document_attachments = False
                 _response_pre_extract = response
-
-                # Extract MEDIA:<path> tags (from TTS tool) before other processing
-                media_files, response = self.extract_media(response)
-                media_files = self.filter_media_delivery_paths(media_files, session_key=session_key)
+                media_files = []
 
                 # Extract image URLs and send them as native platform attachments
                 images, text_content = self.extract_images(response)
                 if images:
                     logger.info("[%s] extract_images found %d image(s) in response (%d chars)", self.name, len(images), len(response))
 
+                # Bare local paths remain ordinary text; only send_attachment
+                # can enqueue a local file for delivery.
                 local_files = []
-                if not is_ephemeral_response:
-                    # Auto-detect bare local file paths for native media delivery
-                    # (helps small models that don't use MEDIA: syntax). Skip
-                    # system/command notices so config paths stay visible text
-                    # instead of becoming native uploads.
-                    local_files, text_content = self.extract_local_files(text_content)
-                    local_files = self.filter_local_delivery_paths(local_files, session_key=session_key)
-                    # Do NOT load the full SQLite transcript for ordinary text or
-                    # explicit MEDIA tags.  History is needed only for bare local
-                    # paths auto-detected above.  Run that synchronous DB/decode
-                    # work off the platform event loop so a slow state.db read
-                    # cannot block Discord heartbeats and trigger the liveness
-                    # watchdog.  On lookup failure the helper returns None and we
-                    # fail open by delivering the candidate file.
-                    _history_media_paths = None
-                    if local_files:
-                        _history_media_paths = (
-                            await self._bounded_history_media_paths_for_session(
-                                session_key
-                            )
-                        )
-                    if _history_media_paths:
-                        _suppressed = [p for p in local_files if p in _history_media_paths]
-                        if _suppressed:
-                            # Log the suppression (#73771) — silent drops here
-                            # cost operators hours of log-diving.
-                            logger.info(
-                                "[%s] Suppressing %d bare local file path(s) already "
-                                "delivered in this session: %s",
-                                self.name, len(_suppressed), _suppressed,
-                            )
-                        local_files = [p for p in local_files if p not in _history_media_paths]
-                    if local_files:
-                        logger.info("[%s] extract_local_files found %d file(s) in response", self.name, len(local_files))
 
                 # A2 (#29346): extraction can reduce a non-empty response to
                 # empty text with no attachment, and the `if text_content` guard

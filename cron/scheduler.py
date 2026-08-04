@@ -3120,36 +3120,11 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     else:
         delivery_content = content
 
-    # Extract MEDIA: tags so attachments are forwarded as files, not raw text
-    from gateway.platforms.base import BasePlatformAdapter
-
-    # Bridge gateway media-policy config (strict / allow_dirs / trust_recent)
-    # into the env vars the path validator reads. Gateway startup does this
-    # at boot; a standalone process (manual `hermes cron run` from the CLI,
-    # a cron tick without the gateway) historically did NOT — so manual runs
-    # filtered attachment paths under a DIFFERENT policy than scheduled runs
-    # and silently dropped files the gateway would deliver. Idempotent,
-    # env-wins, never raises.
-    from gateway.media_policy import apply_media_policy_env
-
-    apply_media_policy_env(user_cfg)
-
-    media_files, cleaned_delivery_content = BasePlatformAdapter.extract_media(delivery_content)
-    requested_media = [(str(p), v) for p, v in media_files]
-    media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
-    # Attachments the policy filter dropped will never be sent on ANY lane —
-    # record them up front so the run status says so (previously one
-    # stderr WARNING was the only trace: text delivered, file vanished).
-    _policy_dropped = len(requested_media) - len(media_files)
-    policy_drop_errors = (
-        [
-            f"{_policy_dropped} media attachment(s) dropped by media path "
-            "policy (missing file, denied prefix, or strict-mode miss); "
-            "see gateway.strict / media_delivery_allow_dirs in config.yaml"
-        ]
-        if _policy_dropped > 0
-        else []
-    )
+    # Scheduled text never acts as an implicit local-file delivery channel.
+    # Cron attachments must be sent through an explicit attachment action.
+    media_files = []
+    cleaned_delivery_content = delivery_content
+    policy_drop_errors = []
 
     # Resolve the delivery-mirror gate ONCE (default off). When on, each
     # successful delivery is also appended to the target chat's gateway session
@@ -3159,14 +3134,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         mirror_enabled = _cron_mirror_delivery_enabled(job, user_cfg)
     except Exception:
         mirror_enabled = False
-    # Keep the cleaned delivery text available independently of the optional
-    # transcript-mirror knob. Continuable surfaces (notably in_channel) must
-    # seed their target session even when attach_to_session=false and
-    # cron.mirror_delivery=false; gating this value on mirror_enabled makes
-    # the seed receive an empty string and return False, which is exactly the
-    # live failure reproduced three times on Alice (job ef7bd2869d15).
-    _, mirror_text = BasePlatformAdapter.extract_media(content)
-    mirror_text = (mirror_text or "").strip()
+    mirror_text = (content or "").strip()
 
     try:
         config = load_gateway_config()

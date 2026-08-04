@@ -125,7 +125,8 @@ class TestAudioBlock:
             mimeType="audio/wav",
         )
         out = _cache_mcp_audio_block(block)
-        assert out.startswith("MEDIA:")
+        assert "send_attachment" in out
+        assert str(tmp_path) in out
 
 
 class TestToolResultLoopOrdering:

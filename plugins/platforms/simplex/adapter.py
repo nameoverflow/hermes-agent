@@ -809,9 +809,8 @@ class SimplexAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Send a text message.
 
-        If *content* contains ``MEDIA:<path>`` tags (embedded by TTS / audio
-        tools to signal file attachments), they are stripped from the text
-        body and sent as native voice notes or documents.
+        Local attachments are delivered only through explicit attachment APIs;
+        message text is never parsed as a file-delivery control channel.
 
         Groups use the structured ``/_send #<id> json [...]`` form
         because the bracket chat-command syntax (``#[<id>] text``) is
@@ -825,11 +824,6 @@ class SimplexAdapter(BasePlatformAdapter):
         waiting for one would serialise all outbound traffic behind a
         30-second timeout.
         """
-        _voice_exts = {".ogg", ".mp3", ".wav", ".m4a", ".opus"}
-        media_paths = re.findall(r"MEDIA:(\S+)", content)
-        if media_paths:
-            content = re.sub(r"MEDIA:\S+", "", content).strip()
-
         if content:
             corr_id = self._make_corr_id()
             # Structured form: addresses by ID, and json.dumps escapes
@@ -845,15 +839,6 @@ class SimplexAdapter(BasePlatformAdapter):
                 cmd_str = f"/_send @{chat_id} json {composed}"
 
             await self._send_ws({"corrId": corr_id, "cmd": cmd_str})
-
-        for path in media_paths:
-            is_voice = os.path.splitext(path)[1].lower() in _voice_exts
-            if is_voice:
-                media_result = await self.send_voice(chat_id, path)
-            else:
-                media_result = await self.send_document(chat_id, path)
-            if not media_result.success:
-                return media_result
 
         return SendResult(success=True)
 
@@ -1378,8 +1363,7 @@ def register(ctx) -> None:
             "not phone numbers or usernames. SimpleX supports standard "
             "markdown formatting. There is no typing indicator and no "
             "hard message length limit, but keep responses conversational. "
-            "You can attach native images, voice notes, and arbitrary "
-            "files; the adapter handles MEDIA:<path> tags by sending them "
-            "as inline voice notes (audio extensions) or documents."
+            "You can attach native images, voice notes, and arbitrary files "
+            "by calling send_attachment with the absolute local path."
         ),
     )

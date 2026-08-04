@@ -481,8 +481,6 @@ def _handle_send(args):
         from model_tools import _run_async
         send_kwargs = {
             "thread_id": thread_id,
-            "media_files": media_files,
-            "force_document": force_document_attachments,
         }
         # Preserve the exact built-in call contract; only custom handlers need
         # the complete typed request.

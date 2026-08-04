@@ -265,8 +265,8 @@ def _extract_message_content(msg: dict) -> str:
 def _extract_attachments(msg: dict) -> List[dict]:
     """Extract non-text attachments from a message.
 
-    Finds: multi-part image/file content blocks, MEDIA: tags in text,
-    image URLs, and file references.
+    Finds structured multi-part image/file content blocks, image URLs, and
+    file references. Plain text is never treated as an attachment channel.
     """
     attachments = []
     content = msg.get("content", "")
@@ -288,14 +288,6 @@ def _extract_attachments(msg: dict) -> List[dict]:
             elif ptype not in {"text",}:
                 # Unknown non-text content type
                 attachments.append({"type": ptype, "data": part})
-
-    # MEDIA: tags in text content
-    text = _extract_message_content(msg)
-    if text:
-        media_pattern = re.compile(r'MEDIA:\s*(\S+)')
-        for match in media_pattern.finditer(text):
-            path = match.group(1)
-            attachments.append({"type": "media", "path": path})
 
     return attachments
 

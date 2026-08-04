@@ -1234,7 +1234,7 @@ def _mcp_resource_filename(uri: str, mime_type: str) -> str:
 
 
 def _cache_mcp_audio_block(block) -> str:
-    """Cache an MCP ``AudioContent`` block and return a ``MEDIA:`` tag.
+    """Cache an MCP ``AudioContent`` block and return explicit delivery guidance.
 
     Returns an empty string when *block* is not audio or on any failure —
     same fail-open contract as ``_cache_mcp_image_block``.
@@ -1270,7 +1270,7 @@ def _cache_mcp_audio_block(block) -> str:
     except Exception as exc:
         logger.warning("MCP audio block cache failed: %s", exc)
         return ""
-    return f"MEDIA:{audio_path}"
+    return f"[MCP audio saved to {audio_path}; call send_attachment with this path to deliver it]"
 
 
 def _render_mcp_resource_block(block, server_name: str = "") -> str:

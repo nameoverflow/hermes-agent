@@ -3732,7 +3732,7 @@ def register(ctx) -> None:
             "across multiple messages. You are in a space (DM or group). "
             "Images render inline; audio, video, and document attachments "
             "render as download cards (no native voice/video UI). To send "
-            "files, include MEDIA:/absolute/path/to/file in your response. "
+            "files, call send_attachment with the absolute local path. "
             "Native file attachments require the user to run /setup-files "
             "once in their own DM — until they do, file requests fall back "
             "to a text notice with the host path. Do NOT generate interactive "
