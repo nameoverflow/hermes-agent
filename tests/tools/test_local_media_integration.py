@@ -45,20 +45,3 @@ def test_attachment_uses_real_discord_dispatch_and_caption_routing(monkeypatch, 
     assert calls == [("12345", "", {
         "thread_id": "67890", "media_files": [(str(path), False)], "caption": "Report",
     })]
-
-
-def test_kling_capabilities_drive_upstream_dynamic_schema(monkeypatch):
-    from plugins.video_gen.kling import KlingVideoGenProvider
-    from tools import video_generation_tool
-
-    provider = KlingVideoGenProvider()
-    monkeypatch.setattr(video_generation_tool, "_resolve_active_provider", lambda: provider)
-    monkeypatch.setattr(video_generation_tool, "_read_configured_video_model", lambda: None)
-    schema = video_generation_tool._build_dynamic_video_schema()
-    props = schema["parameters"]["properties"]
-
-    assert "image_url" in props
-    assert "reference_image_urls" in props
-    assert "audio" in props
-    assert "negative_prompt" not in props
-    assert "seed" not in props

@@ -17,7 +17,6 @@ Model families (most expose both t2v + i2v; gemini-omni-flash is image-to-video 
   Premium tier:
     veo3.1             fal-ai/veo3.1                              /  fal-ai/veo3.1/image-to-video
     seedance-2.0       bytedance/seedance-2.0/text-to-video       /  bytedance/seedance-2.0/image-to-video
-    seedance-2.0-fast  bytedance/seedance-2.0/fast/text-to-video / bytedance/seedance-2.0/fast/image-to-video
     seedance-2.5       bytedance/seedance-2.5/text-to-video       /  bytedance/seedance-2.5/image-to-video
     minimax-h3         minimax/h3/text-to-video                   /  minimax/h3/image-to-video
     minimax-h3-max     minimax/h3-max/text-to-video               /  minimax/h3-max/image-to-video
@@ -295,23 +294,6 @@ FAL_FAMILIES: Dict[str, Dict[str, Any]] = {
         "audio_native": True,  # native audio in every generation (fal docs)  # audio is native; no generate_audio key
         "negative": False,
         "seed": False,
-    },
-    "seedance-2.0-fast": {
-        "display": "Seedance 2.0 Fast",
-        "speed": "lower latency/cost than Seedance 2.0",
-        "price": "premium",
-        "strengths": "ByteDance fast tier. Cinematic output, native audio, multi-shot editing, director-level camera control.",
-        "tier": "premium",
-        "text_endpoint": "bytedance/seedance-2.0/fast/text-to-video",
-        "image_endpoint": "bytedance/seedance-2.0/fast/image-to-video",
-        # Fast supports the same visible controls as the standard Seedance 2.0
-        # endpoint. It also accepts "auto", but we omit it so endpoint defaults
-        # handle automatic sizing.
-        "aspect_ratios": ("21:9", "16:9", "4:3", "1:1", "3:4", "9:16"),
-        "resolutions": ("480p", "720p", "1080p"),
-        "durations": (4, 15),
-        "audio": True,
-        "negative": False,
     },
     "kling-v3-4k": {
         "display": "Kling v3 4K",
