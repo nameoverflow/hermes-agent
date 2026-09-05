@@ -562,9 +562,27 @@ display:
 ```
 
 - `off` — no progress messages
-- `new` — only show the first tool call per turn
-- `all` — show all tool calls (truncated to 40 characters in gateway messages)
-- `verbose` — show full tool call details (can produce long messages)
+- `new`, `all`, `verbose` — on Discord, show a short, friendly line for each
+  call in one continuously edited message. The window keeps the latest 10
+  calls, rolling older entries out as new ones arrive. Repeated calls remain
+  individual entries. Other platforms retain their own mode behavior.
+
+Discord always groups progress in this single message, including when the
+global `tool_progress_grouping` setting is `separate`. Interim assistant
+commentary appears beneath the calls as small grey subtext; each update
+replaces the previous commentary without using a tool-call slot. Enable it
+for Discord with:
+
+```yaml
+display:
+  platforms:
+    discord:
+      tool_progress: all
+      interim_assistant_messages: true
+```
+
+Final answers retain their normal formatting. The existing `cleanup_progress`
+setting controls whether the progress message is removed after a successful turn.
 
 #### `display.tool_progress_command`
 
@@ -927,5 +945,4 @@ Leave `everyone` and `roles` at `false` unless you know exactly why you need the
 :::
 
 For more information on securing your Hermes Agent deployment, see the [Security Guide](../security.md).
-
 

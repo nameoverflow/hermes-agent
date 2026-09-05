@@ -1244,6 +1244,67 @@ async def test_run_agent_interim_commentary_reuses_progress_bubble(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("retry_edit", [False, True])
+async def test_discord_rolls_one_live_message_and_flushes_idle_updates(
+    monkeypatch, tmp_path, retry_edit,
+):
+    import threading
+
+    first_sent = threading.Event()
+    latest_edited = threading.Event()
+
+    class WindowAdapter(ProgressCaptureAdapter):
+        MAX_MESSAGE_LENGTH = 2000
+
+        async def send(self, *args, **kwargs):
+            result = await super().send(*args, **kwargs)
+            first_sent.set()
+            return result
+
+        async def edit_message(self, chat_id, message_id, content):
+            first_edit = not self.edits
+            result = await super().edit_message(chat_id, message_id, content)
+            if retry_edit and first_edit:
+                return SendResult(success=False, error="temporary failure", retryable=True)
+            if "Checked result 24" in content:
+                latest_edited.set()
+            return result
+
+    class WindowAgent(CommentaryAgent):
+        def run_conversation(self, message, conversation_history=None, task_id=None):
+            self.tool_progress_callback("tool.started", "read_file", "initial.txt", {})
+            assert first_sent.wait(8), "initial progress was not sent"
+            for i in range(25):
+                self.tool_progress_callback(
+                    "tool.started", "read_file", f"file-{i:02}.txt", {},
+                )
+                self.interim_assistant_callback(f"Checked result {i}", already_streamed=False)
+            # The last update must appear while the agent is still running,
+            # even with no further tool events to trigger an edit.
+            assert latest_edited.wait(10), "idle progress update was not flushed"
+            return {"final_response": "done", "messages": [], "api_calls": 1}
+
+    adapter, result = await _run_with_agent(
+        monkeypatch, tmp_path, WindowAgent,
+        session_id="discord-window", platform=Platform.DISCORD,
+        adapter_cls=WindowAdapter,
+        config_data={"display": {
+            "tool_progress": "verbose", "tool_progress_grouping": "separate",
+            "interim_assistant_messages": True,
+            "platforms": {"discord": {"streaming": False}},
+        }},
+    )
+    assert result["final_response"] == "done"
+    assert len(adapter.sent) == 1
+    assert all(edit["message_id"] == "progress-1" for edit in adapter.edits)
+    lines = adapter.edits[-1]["content"].splitlines()
+    assert len(lines) == 11
+    assert all(f"file-{i:02}.txt" in lines[i - 15] for i in range(15, 25))
+    assert lines[-1] == "-# Checked result 24"
+    assert all(len(call["content"]) <= 2000 for call in adapter.sent + adapter.edits)
+
+
+@pytest.mark.asyncio
 async def test_run_agent_previewed_final_in_progress_bubble_keeps_delivery_pending(
     monkeypatch, tmp_path
 ):
@@ -1660,7 +1721,7 @@ async def test_run_agent_drops_interim_commentary_after_generation_invalidation(
 
     async def send_and_invalidate(chat_id, content, reply_to=None, metadata=None):
         result = await original_send(chat_id, content, reply_to=reply_to, metadata=metadata)
-        if content == "first interim" and not invalidated["done"]:
+        if "first interim" in content and not invalidated["done"]:
             invalidated["done"] = True
             runner._invalidate_session_run_generation(session_key, reason="test_stop")
         return result
@@ -1679,8 +1740,8 @@ async def test_run_agent_drops_interim_commentary_after_generation_invalidation(
 
     sent_texts = [call["content"] for call in adapter.sent]
     assert result["final_response"] == "done"
-    assert "first interim" in sent_texts
-    assert "second interim" not in sent_texts
+    assert any("first interim" in text for text in sent_texts)
+    assert not any("second interim" in text for text in sent_texts)
 
 
 @pytest.mark.asyncio

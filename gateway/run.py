@@ -4857,6 +4857,13 @@ class TurnRunner:
         except Exception:
             pass
 
+        if ctx.source.platform == Platform.DISCORD:
+            from gateway.discord_progress import format_tool_call
+            ctx.progress_queue.put(("__tool__", format_tool_call(
+                tool_name, args, preview, self._runner._adapter_for_source(ctx.source),
+            )))
+            return
+
         # "new" mode: only report when tool changes
         if ctx.progress_mode == "new" and tool_name == ctx.last_tool[0]:
             return
@@ -5245,6 +5252,12 @@ class TurnRunner:
         progress_lines = []      # Accumulated tool lines for the CURRENT editable bubble
         progress_msg_id = None   # ID of the current progress message to edit
         can_edit = ctx.progress_grouping != "separate"  # "separate" = one message per tool (pre-v0.9 behavior)
+        discord_window = None
+        discord_delivered_text = None
+        if ctx.source.platform == Platform.DISCORD:
+            from gateway.discord_progress import DiscordProgressWindow
+            discord_window = DiscordProgressWindow()
+            can_edit = True
         _last_edit_ts = 0.0      # Throttle edits to avoid Telegram flood control
         _PROGRESS_EDIT_INTERVAL = 1.5  # Minimum seconds between edits
 
@@ -5292,6 +5305,7 @@ class TurnRunner:
                 _edit_accepts_metadata = False
 
         async def _edit_progress_message(message_id: str, content: str):
+            nonlocal discord_delivered_text
             kwargs = {
                 "chat_id": ctx.source.chat_id,
                 "message_id": message_id,
@@ -5301,10 +5315,20 @@ class TurnRunner:
                 kwargs["finalize"] = True
             if _edit_accepts_metadata:
                 kwargs["metadata"] = ctx._progress_metadata
-            return await adapter.edit_message(**kwargs)
+            result = await adapter.edit_message(**kwargs)
+            if discord_window is not None and result.success:
+                discord_delivered_text = content
+            return result
 
         def _progress_text(lines: list) -> str:
             return "\n".join(str(line) for line in lines)
+
+        def _append_progress(raw) -> None:
+            if discord_window is not None:
+                discord_window.append(raw)
+                progress_lines[:] = [discord_window.render(_PROGRESS_TEXT_LIMIT)]
+            else:
+                progress_lines.append(raw)
 
         def _split_progress_groups(lines: list) -> list[list]:
             """Partition progress lines into platform-sized editable bubbles."""
@@ -5330,6 +5354,7 @@ class TurnRunner:
                 ctx._cleanup_msg_ids.append(str(result.message_id))
 
         async def _send_progress_text(text: str):
+            nonlocal discord_delivered_text
             result = await adapter.send(
                 chat_id=ctx.source.chat_id,
                 content=text,
@@ -5337,6 +5362,8 @@ class TurnRunner:
                 metadata=ctx._progress_metadata,
             )
             _track_progress_result(result)
+            if discord_window is not None and result.success:
+                discord_delivered_text = text
             return result
 
         async def _roll_progress_overflow_if_needed() -> bool:
@@ -5387,6 +5414,13 @@ class TurnRunner:
             nonlocal progress_msg_id, progress_lines
             if not progress_lines:
                 return
+            if discord_window is not None:
+                interrupted = ctx.agent_holder and getattr(ctx.agent_holder[0], "is_interrupted", False)
+                if not ctx._run_still_current() or interrupted:
+                    return
+                text = _progress_text(progress_lines)
+                if not text or text == discord_delivered_text:
+                    return
             if can_edit:
                 await _roll_progress_overflow_if_needed()
                 full_text = _progress_text(progress_lines)
@@ -5411,9 +5445,16 @@ class TurnRunner:
 
         async def _drain_progress_queue() -> None:
             nonlocal progress_msg_id, progress_lines
+            if discord_window is not None:
+                interrupted = ctx.agent_holder and getattr(ctx.agent_holder[0], "is_interrupted", False)
+                if not ctx._run_still_current() or interrupted:
+                    return
             while not ctx.progress_queue.empty():
                 try:
                     raw = ctx.progress_queue.get_nowait()
+                    if discord_window is not None:
+                        _append_progress(raw)
+                        continue
                     if isinstance(raw, tuple) and len(raw) == 3 and raw[0] == "__dedup__":
                         _, base_msg, count = raw
                         if progress_lines:
@@ -5426,7 +5467,7 @@ class TurnRunner:
                         ctx.last_progress_msg[0] = None
                         ctx.repeat_count[0] = 0
                     else:
-                        progress_lines.append(raw)
+                        _append_progress(raw)
                         await _roll_progress_overflow_if_needed()
                 except Exception:
                     break
@@ -5461,7 +5502,14 @@ class TurnRunner:
                     pass
 
                 # Handle dedup messages: update last line with repeat counter
-                if isinstance(raw, tuple) and len(raw) == 3 and raw[0] == "__dedup__":
+                if discord_window is not None:
+                    _append_progress(raw)
+                    while not ctx.progress_queue.empty():
+                        _append_progress(ctx.progress_queue.get_nowait())
+                    msg = _progress_text(progress_lines)
+                    if not msg:
+                        continue
+                elif isinstance(raw, tuple) and len(raw) == 3 and raw[0] == "__dedup__":
                     _, base_msg, count = raw
                     if progress_lines:
                         progress_lines[-1] = f"{base_msg} (×{count + 1})"
@@ -5482,7 +5530,7 @@ class TurnRunner:
                     continue
                 else:
                     msg = raw
-                    progress_lines.append(msg)
+                    _append_progress(msg)
 
                 if await _roll_progress_overflow_if_needed():
                     _last_edit_ts = time.monotonic()
@@ -5507,11 +5555,19 @@ class TurnRunner:
                 if not ctx._run_still_current():
                     return
 
+                if discord_window is not None and _progress_text(progress_lines) == discord_delivered_text:
+                    continue
+
                 if can_edit and progress_msg_id is not None:
                     # Try to edit the existing progress message
                     full_text = "\n".join(progress_lines)
                     result = await _edit_progress_message(progress_msg_id, full_text)
                     if not result.success:
+                        if discord_window is not None:
+                            # Keep the one-message window even on failed edits;
+                            # later ticks retry instead of spamming new bubbles.
+                            _last_edit_ts = time.monotonic()
+                            continue
                         _err = (getattr(result, "error", "") or "").lower()
                         # Transient network errors (ConnectError, timeouts)
                         # must not permanently disable progress-message
@@ -5566,6 +5622,8 @@ class TurnRunner:
                         )
                     if result.success and result.message_id:
                         progress_msg_id = result.message_id
+                        if discord_window is not None:
+                            discord_delivered_text = full_text
                         if ctx._cleanup_progress:
                             ctx._cleanup_msg_ids.append(str(result.message_id))
 
@@ -5578,6 +5636,12 @@ class TurnRunner:
 
             except queue.Empty:
                 try:
+                    if (
+                        discord_window is not None and progress_lines
+                        and time.monotonic() - _last_edit_ts >= _PROGRESS_EDIT_INTERVAL
+                    ):
+                        await _flush_progress_lines()
+                        _last_edit_ts = time.monotonic()
                     await asyncio.sleep(0.3)
                 except asyncio.CancelledError:
                     await _drain_progress_queue()
@@ -5958,7 +6022,10 @@ class TurnRunner:
             display_text = str(text or "").strip()
             if ctx._progress_bubble_for_interim:
                 if display_text:
-                    ctx.progress_queue.put(display_text)
+                    ctx.progress_queue.put(
+                        ("__commentary__", display_text)
+                        if ctx.source.platform == Platform.DISCORD else display_text
+                    )
                 return
             if _stream_consumer is not None:
                 if already_streamed:
