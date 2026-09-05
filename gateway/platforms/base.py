@@ -7447,11 +7447,6 @@ class BasePlatformAdapter(ABC):
         return content
     
     @staticmethod
-    def _adjust_split_away_from_special_marker(text: str, split_at: int) -> int:
-        """Return split_at unchanged; response text has no control markers."""
-        return split_at
-
-    @staticmethod
     def truncate_message(
         content: str,
         max_length: int = 4096,

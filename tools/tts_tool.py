@@ -3505,8 +3505,8 @@ def text_to_speech_tool(
     combines preserve separate valid files, and no over-limit final artifact
     is returned.
 
-    On messaging platforms, the returned MEDIA:<path> tag is intercepted
-    by the send pipeline and delivered as a native voice message.
+    On messaging platforms, deliver the returned file_paths with send_attachment.
+    Use mode=voice when voice_compatible is true.
     In CLI mode, the file is saved to ~/voice-memos/.
 
     Args:
@@ -3668,15 +3668,10 @@ def text_to_speech_tool(
                 f"{os.path.getsize(path):,}",
                 provider,
             )
-        media_tag = "\n".join(f"MEDIA:{path}" for path in final_paths)
-        if voice_compatible:
-            media_tag = f"[[audio_as_voice]]\n{media_tag}"
-
         return json.dumps({
             "success": True,
             "file_path": final_paths[0],
             "file_paths": final_paths,
-            "media_tag": media_tag,
             "provider": chunk_results[0].get("provider", provider),
             "voice_compatible": voice_compatible,
             "chunk_count": len(chunks),
@@ -4493,7 +4488,7 @@ from tools.registry import registry, tool_error
 
 TTS_SCHEMA = {
     "name": "text_to_speech",
-    "description": "Convert text to speech audio. Returns JSON with file_path and voice_compatible. On messaging platforms, call send_attachment with path=file_path and mode='voice' when voice_compatible is true (otherwise mode='auto') to deliver it as native audio. In CLI mode, saves to ~/voice-memos/. Voice and provider are user-configured (built-in providers like edge/openai or custom command providers under tts.providers.<name>), not model-selected.",
+    "description": "Convert text to speech audio. Returns JSON with file_paths and voice_compatible. On messaging platforms, call send_attachment for each returned path and mode='voice' when voice_compatible is true (otherwise mode='auto') to deliver it as native audio. In CLI mode, saves to ~/voice-memos/. Voice and provider are user-configured (built-in providers like edge/openai or custom command providers under tts.providers.<name>), not model-selected.",
     "parameters": {
         "type": "object",
         "properties": {

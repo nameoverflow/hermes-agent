@@ -3134,6 +3134,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         mirror_enabled = _cron_mirror_delivery_enabled(job, user_cfg)
     except Exception:
         mirror_enabled = False
+    # Continuable deliveries need this text even when transcript mirroring is off.
     mirror_text = (content or "").strip()
 
     try:

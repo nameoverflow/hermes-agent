@@ -162,14 +162,6 @@ class ImageGenProvider(abc.ABC):
             "max_reference_images": 0,
         }
 
-    def supports_input_image(self) -> bool:
-        """Return True when ``generate(..., image_url=...)`` is supported."""
-        try:
-            modalities = self.capabilities().get("modalities") or []
-        except Exception:
-            return False
-        return "image" in set(modalities)
-
     @abc.abstractmethod
     def generate(
         self,

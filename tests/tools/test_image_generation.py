@@ -9,7 +9,6 @@ tests/tools/test_managed_media_gateways.py.
 
 from __future__ import annotations
 
-import json
 from unittest.mock import patch
 
 import pytest
@@ -364,6 +363,7 @@ class TestRegistryIntegration:
     def test_aspect_ratio_enum_is_three_values(self, image_tool):
         enum = image_tool.IMAGE_GENERATE_SCHEMA["parameters"]["properties"]["aspect_ratio"]["enum"]
         assert set(enum) == {"landscape", "square", "portrait"}
+
 
 # ---------------------------------------------------------------------------
 # Managed gateway 4xx translation

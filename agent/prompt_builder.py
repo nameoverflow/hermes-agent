@@ -775,8 +775,8 @@ def hud_surface_note(valid_tool_names: "set[str] | None" = None) -> str:
 DEVELOPER_ROLE_MODELS = ("gpt-5", "codex")
 
 _MEDIA_NATIVE = (
-    "You can send files natively: write MEDIA:/absolute/path/to/file in "
-    "your response. "
+    "You can send files natively: call send_attachment with the absolute "
+    "local path. File paths in response text never trigger attachment delivery. "
 )
 
 _LOCAL_CRON_DELIVERY_NOTE = (
@@ -818,18 +818,17 @@ PLATFORM_HINTS = {
         "structured data (no tables). "
         + _MEDIA_NATIVE +
         "Images (.png, .jpg, .webp) send as photos, videos (.mp4) play "
-        "inline; image URLs via ![alt](url) send as photos. Audio: add "
-        "[[audio_as_voice]] on its own line to send ANY audio file as a "
-        "native voice bubble (non-Opus transcodes automatically); without "
-        "it, .mp3/.m4a arrive as audio files, other formats as documents."
+        "inline; image URLs via ![alt](url) send as photos. Use "
+        "send_attachment mode=voice for compatible voice audio; other audio "
+        "can be delivered as files."
     ),
     "discord": (
         "You are in a Discord server or group chat communicating with your user. "
         "Discord renders standard markdown natively (bold, italic, code "
         "blocks, links); tables are NOT supported — use bullet lists or "
         "labeled lines. "
-        "You can send media files natively: include MEDIA:/absolute/path/to/file "
-        "in your response. Images (.png, .jpg, .webp) are sent as photo "
+        "You can send media files natively: call send_attachment with the absolute "
+        "local path. Images (.png, .jpg, .webp) are sent as photo "
         "attachments, audio as file attachments. You can also include image URLs "
         "in markdown format ![alt](url) and they will be sent as attachments."
     ),
@@ -838,8 +837,8 @@ PLATFORM_HINTS = {
         "Standard markdown is auto-converted to Slack formatting (bold, "
         "headers, links, code); tables are NOT supported — use bullet lists "
         "or labeled lines. "
-        "You can send media files natively: include MEDIA:/absolute/path/to/file "
-        "in your response. Images (.png, .jpg, .webp) are uploaded as photo "
+        "You can send media files natively: call send_attachment with the absolute "
+        "local path. Images (.png, .jpg, .webp) are uploaded as photo "
         "attachments, audio as file attachments. You can also include image URLs "
         "in markdown format ![alt](url) and they will be uploaded as attachments."
     ),
@@ -873,9 +872,8 @@ PLATFORM_HINTS = {
         "You are in a plain terminal (CLI). Markdown does NOT render — "
         "asterisks, headers, and fences appear as literal characters, so "
         "write plain text (indentation and blank lines are your only "
-        "layout tools). Files: there is no attachment channel and "
-        "MEDIA:/path tags are NOT intercepted here (they print as "
-        "literal text) — deliver a file by stating its absolute path or "
+        "layout tools). Files: there is no attachment channel — "
+        "deliver a file by stating its absolute path or "
         "URL in plain text; the user opens it themselves. "
         + _LOCAL_CRON_DELIVERY_NOTE
     ),
@@ -883,8 +881,7 @@ PLATFORM_HINTS = {
         # Same file-delivery reality as the CLI (maintainer-confirmed):
         # no MEDIA: interception in tui/ — tags would print literally.
         "You are in the Hermes terminal UI (TUI). Files: there is no "
-        "attachment channel and MEDIA:/path tags are NOT intercepted "
-        "here (they print as literal text) — deliver a file by stating "
+        "attachment channel — deliver a file by stating "
         "its absolute path or URL in plain text. "
         + _LOCAL_CRON_DELIVERY_NOTE
     ),
@@ -902,11 +899,9 @@ PLATFORM_HINTS = {
         "You are chatting inside the Hermes desktop app, a graphical chat "
         "surface. Markdown renders with full GitHub flavor (tables, "
         "syntax-highlighted code, math via $...$, task lists, callouts). "
-        "Deliver files by writing MEDIA:/absolute/path/to/file — any file "
-        "type: images/audio/video render inline, everything else becomes a "
-        "card with Download and preview buttons. Remote image URLs render "
-        "via ![alt](url); local files ONLY via MEDIA: (local markdown "
-        "images are blocked). "
+        "Deliver files using send_attachment with an absolute local path "
+        "when a gateway target is available; otherwise state the file path. "
+        "Remote image URLs render via ![alt](url). "
         "Inline widget/chart (living IN the chat): write an HTML file, then "
         "put ::preview{file=\"path.html\"} alone on its own line (plugins "
         "can register more ::name{...} directives). The frame already "
@@ -958,8 +953,8 @@ PLATFORM_HINTS = {
         "You are in a Feishu (Lark) workspace communicating with your user. "
         "Feishu renders Markdown in messages — bold, italic, code blocks, and "
         "links are supported. "
-        "You can send media files natively: include MEDIA:/absolute/path/to/file "
-        "in your response. Images (.jpg, .png, .webp) are uploaded and displayed "
+        "You can send media files natively: call send_attachment with the absolute "
+        "local path. Images (.jpg, .png, .webp) are uploaded and displayed "
         "inline, audio files as native voice messages (non-Opus formats are "
         "transcoded automatically; without ffmpeg they fall back to file "
         "attachments), and other files as attachments."
