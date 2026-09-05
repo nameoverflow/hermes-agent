@@ -61,6 +61,7 @@ class FakeTextChannel:
         self.name = name
         self.guild = SimpleNamespace(name=guild_name)
         self.topic = None
+        self.send = AsyncMock()
 
 
 class FakeThread:
@@ -216,6 +217,34 @@ async def test_auto_thread_failure_skips_agent_and_notifies_user(adapter, monkey
     assert "thread" in sent_text.lower()
 
 
+@pytest.mark.asyncio
+async def test_auto_create_thread_reuses_existing_message_thread(adapter):
+    existing_thread = FakeThread(channel_id=1234, name="existing")
+    message = make_message(channel=FakeTextChannel(channel_id=900), content="hello")
+    message.thread = existing_thread
+    message.create_thread = AsyncMock()
+
+    result = await adapter._auto_create_thread(message)
+
+    assert result is existing_thread
+    message.create_thread.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_auto_create_thread_suppresses_already_created_fallback(adapter):
+    channel = FakeTextChannel(channel_id=900)
+    message = make_message(channel=channel, content="hello")
+    message.create_thread = AsyncMock(
+        side_effect=RuntimeError("A thread has already been created for this message")
+    )
+
+    result = await adapter._auto_create_thread(message)
+
+    assert result is None
+    message.create_thread.assert_awaited_once()
+    channel.send.assert_not_awaited()
+
+
 # ── config.py bridging ───────────────────────────────────────────────
 
 
@@ -238,5 +267,4 @@ def test_config_bridges_ignored_channels(monkeypatch, tmp_path):
 
     import os
     assert os.getenv("DISCORD_IGNORED_CHANNELS") == "111,222"
-
 

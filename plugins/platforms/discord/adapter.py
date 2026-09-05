@@ -74,6 +74,9 @@ _DISCORD_COMMAND_SYNC_POLICIES = {"safe", "bulk", "off"}
 _DISCORD_COMMAND_SYNC_STATE_SUBDIR = "gateway"
 _DISCORD_COMMAND_SYNC_STATE_FILENAME = "discord_command_sync_state.json"
 _DISCORD_NONCONVERSATIONAL_STATE_FILENAME = "discord_nonconversational_messages.json"
+_DISCORD_INBOUND_DEDUP_SUBDIR = "discord_inbound_dedup"
+_DISCORD_INBOUND_DEDUP_TTL_SECONDS = 300.0
+_DISCORD_INBOUND_DEDUP_PRUNE_EVERY = 128
 
 _DISCORD_COMMAND_SYNC_MUTATION_INTERVAL_SECONDS = 4.5
 _DISCORD_COMMAND_SYNC_MAX_RATE_LIMIT_SLEEP_SECONDS = 30.0
@@ -331,6 +334,55 @@ def _find_discord_windows_bundled_opus(discord_module: Any = None) -> Optional[s
     if bundled.is_file():
         return str(bundled)
     return None
+
+
+def _claim_discord_inbound_message_once(message_id: str) -> bool:
+    """Atomically claim a Discord inbound message ID across adapter instances."""
+    message_id = str(message_id or "").strip()
+    if not message_id:
+        return True
+
+    try:
+        from hermes_constants import get_hermes_home
+
+        root = (
+            get_hermes_home()
+            / _DISCORD_COMMAND_SYNC_STATE_SUBDIR
+            / _DISCORD_INBOUND_DEDUP_SUBDIR
+        )
+        root.mkdir(parents=True, exist_ok=True)
+        filename = hashlib.sha256(message_id.encode("utf-8")).hexdigest() + ".seen"
+        path = root / filename
+        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps({"id": message_id, "ts": time.time()}))
+        return True
+    except FileExistsError:
+        return False
+    except Exception as exc:  # pragma: no cover - defensive fail-open path
+        logger.debug("[Discord] Failed to claim inbound message %s: %s", message_id, exc)
+        return True
+
+
+def _prune_discord_inbound_dedup_markers() -> None:
+    """Best-effort cleanup for old cross-instance Discord dedup markers."""
+    try:
+        from hermes_constants import get_hermes_home
+
+        root = (
+            get_hermes_home()
+            / _DISCORD_COMMAND_SYNC_STATE_SUBDIR
+            / _DISCORD_INBOUND_DEDUP_SUBDIR
+        )
+        if not root.exists():
+            return
+        cutoff = time.time() - _DISCORD_INBOUND_DEDUP_TTL_SECONDS
+        for marker in root.glob("*.seen"):
+            with suppress(OSError):
+                if marker.stat().st_mtime < cutoff:
+                    marker.unlink()
+    except Exception as exc:  # pragma: no cover - cleanup must never affect delivery
+        logger.debug("[Discord] Failed to prune inbound dedup markers: %s", exc)
 
 
 class _DiscordNonConversationalMessageTracker:
@@ -1171,6 +1223,7 @@ class DiscordAdapter(BasePlatformAdapter):
         # Persistent set of bot-authored lifecycle/status message IDs that
         # should not act as conversational history boundaries after restart.
         self._nonconversational_messages = _DiscordNonConversationalMessageTracker()
+        self._inbound_dedup_prune_counter = 0
         # Last truncated mid-stream preview delivered per (chat_id, message_id).
         # Once an oversized streaming edit saturates at the 2000-char preview
         # cap, every subsequent progressive edit truncates to the SAME text;
@@ -1565,6 +1618,20 @@ class DiscordAdapter(BasePlatformAdapter):
         """Return ``(admitted, role_authorized)`` for one Discord event."""
         message_id = str(getattr(message, "id", ""))
         if claim:
+            if not _claim_discord_inbound_message_once(message_id):
+                logger.debug(
+                    "[%s] Duplicate Discord message %s ignored by shared dedup",
+                    self.name,
+                    message_id,
+                )
+                return False, False
+            self._inbound_dedup_prune_counter += 1
+            if (
+                self._inbound_dedup_prune_counter
+                % _DISCORD_INBOUND_DEDUP_PRUNE_EVERY
+                == 0
+            ):
+                _prune_discord_inbound_dedup_markers()
             if self._dedup.is_duplicate(message_id):
                 return False, False
         elif self._dedup.contains(message_id):
@@ -7291,6 +7358,10 @@ class DiscordAdapter(BasePlatformAdapter):
         burn through to the caller's failure path (#20243).
         """
         thread_name = self._derive_auto_thread_name(message.content or "")
+        existing_thread = getattr(message, "thread", None)
+        if existing_thread is not None:
+            return existing_thread
+
         display_name = getattr(getattr(message, "author", None), "display_name", None) or "unknown user"
         reason = f"Auto-threaded from mention by {display_name}"
 
@@ -7307,6 +7378,17 @@ class DiscordAdapter(BasePlatformAdapter):
                 return thread
             except Exception as direct_error:
                 last_direct_error = direct_error
+                existing_thread = getattr(message, "thread", None)
+                if existing_thread is not None:
+                    return existing_thread
+                if "thread has already been created" in str(direct_error).lower():
+                    logger.info(
+                        "[%s] Auto-thread already exists for Discord message %s; "
+                        "suppressing seed fallback",
+                        self.name,
+                        getattr(message, "id", "?"),
+                    )
+                    return None
                 try:
                     seed_msg = await message.channel.send(
                         f"\U0001f9f5 Thread created by Hermes: **{thread_name}**"

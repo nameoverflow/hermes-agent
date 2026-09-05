@@ -2,6 +2,8 @@
 double-invoke channel.connect() on the same guild."""
 
 import asyncio
+import os
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -77,3 +79,38 @@ async def test_concurrent_joins_do_not_double_connect():
     )
     assert r1 is True and r2 is True
     assert 42 in adapter._voice_clients
+
+
+def test_discord_inbound_claim_is_cross_instance_atomic(tmp_path):
+    """A Discord message ID can be claimed only once across adapter instances.
+
+    This guards the auto-thread path: if an old and new discord.py client both
+    receive the same channel message during a reconnect/restart overlap, only
+    one may continue to side effects such as message.create_thread().
+    """
+    from plugins.platforms.discord.adapter import _claim_discord_inbound_message_once
+
+    with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+        assert _claim_discord_inbound_message_once("msg-123") is True
+        assert _claim_discord_inbound_message_once("msg-123") is False
+        assert _claim_discord_inbound_message_once("msg-456") is True
+
+
+def test_discord_inbound_claim_prunes_expired_markers(tmp_path):
+    from plugins.platforms.discord.adapter import (
+        _DISCORD_INBOUND_DEDUP_TTL_SECONDS,
+        _claim_discord_inbound_message_once,
+        _prune_discord_inbound_dedup_markers,
+    )
+
+    with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+        assert _claim_discord_inbound_message_once("old-msg") is True
+        marker_dir = tmp_path / "gateway" / "discord_inbound_dedup"
+        [marker] = list(marker_dir.glob("*.seen"))
+        old_time = time.time() - _DISCORD_INBOUND_DEDUP_TTL_SECONDS - 10
+        os.utime(marker, (old_time, old_time))
+
+        _prune_discord_inbound_dedup_markers()
+
+        assert not marker.exists()
+        assert _claim_discord_inbound_message_once("old-msg") is True

@@ -121,6 +121,24 @@ class ProgressAgent:
         return {"final_response": "done", "messages": [], "api_calls": 1}
 
 
+class ProgressCommentaryAgent:
+    def __init__(self, **kwargs):
+        self.tool_progress_callback = kwargs.get("tool_progress_callback")
+        self.interim_assistant_callback = kwargs.get("interim_assistant_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        if self.tool_progress_callback:
+            self.tool_progress_callback("tool.started", "terminal", "pwd", {})
+        time.sleep(0.35)
+        if self.interim_assistant_callback:
+            self.interim_assistant_callback(
+                "Checking the result.", already_streamed=False
+            )
+        time.sleep(0.35)
+        return {"final_response": "done", "messages": [], "api_calls": 1}
+
+
 class FailingAgent:
     def __init__(self, **kwargs):
         self.tool_progress_callback = kwargs.get("tool_progress_callback")
@@ -250,6 +268,50 @@ async def test_messaging_agent_forwards_checkpoint_config(monkeypatch, tmp_path)
     assert captured["checkpoint_max_snapshots"] == 9
     assert captured["checkpoint_max_total_size_mb"] == 444
     assert captured["checkpoint_max_file_size_mb"] == 6
+
+
+@pytest.mark.asyncio
+async def test_cleanup_deletes_shared_progress_and_commentary_bubble(
+    monkeypatch, tmp_path
+):
+    adapter = CleanupCaptureAdapter()
+    runner = _make_runner(adapter)
+    gateway_run = _install_fakes(
+        monkeypatch, ProgressCommentaryAgent, cleanup_on=True
+    )
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+
+    source = SessionSource(platform=Platform.TELEGRAM, chat_id="-1001")
+    session_key = "agent:main:telegram:group:-1001"
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-1",
+        session_key=session_key,
+    )
+
+    assert result["final_response"] == "done"
+    all_content = "\n".join(
+        [call["content"] for call in adapter.sent]
+        + [call["content"] for call in adapter.edits]
+    )
+    assert "pwd" in all_content
+    assert "Checking the result." in all_content
+
+    cb = adapter.pop_post_delivery_callback(session_key)
+    assert callable(cb)
+    await _fire_post_delivery_cb(cb)
+    for _ in range(20):
+        await asyncio.sleep(0.01)
+        if adapter.deleted:
+            break
+
+    sent_ids = {str(call["message_id"]) for call in adapter.sent}
+    deleted_ids = {entry["message_id"] for entry in adapter.deleted}
+    assert sent_ids & deleted_ids
 
 
 @pytest.mark.asyncio

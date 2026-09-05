@@ -815,6 +815,31 @@ class CommentaryAgent:
         }
 
 
+class ToolAndCommentaryAgent:
+    def __init__(self, **kwargs):
+        self.tool_progress_callback = kwargs.get("tool_progress_callback")
+        self.interim_assistant_callback = kwargs.get("interim_assistant_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        if self.tool_progress_callback:
+            self.tool_progress_callback("tool.started", "terminal", "pwd", {})
+        time.sleep(0.35)
+        if self.interim_assistant_callback:
+            self.interim_assistant_callback(
+                "I'll inspect the repo first.", already_streamed=False
+            )
+            self.interim_assistant_callback(
+                "I have the first result.", already_streamed=True
+            )
+        time.sleep(0.1)
+        return {
+            "final_response": "done",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
 class PreviewedResponseAgent:
     def __init__(self, **kwargs):
         self.interim_assistant_callback = kwargs.get("interim_assistant_callback")
@@ -1183,6 +1208,57 @@ async def test_display_streaming_does_not_enable_gateway_streaming(monkeypatch, 
     assert [call["content"] for call in adapter.sent] == ["I'll inspect the repo first."]
 
 
+@pytest.mark.asyncio
+async def test_run_agent_interim_commentary_reuses_progress_bubble(
+    monkeypatch, tmp_path
+):
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        ToolAndCommentaryAgent,
+        session_id="sess-commentary-progress-bubble",
+        config_data={
+            "display": {
+                "tool_progress": "all",
+                "tool_progress_grouping": "accumulate",
+                "interim_assistant_messages": True,
+            },
+            "streaming": {
+                "enabled": True,
+                "edit_interval": 0.01,
+                "buffer_threshold": 1,
+            },
+        },
+    )
+
+    assert result["final_response"] == "done"
+    contents = [call["content"] for call in adapter.sent + adapter.edits]
+    final = max(contents, key=len)
+    assert "pwd" in final
+    assert "I'll inspect the repo first." in final
+    assert "I have the first result." in final
+    assert final.index("pwd") < final.index("I'll inspect the repo first.")
+    assert final.index("I'll inspect the repo first.") < final.index(
+        "I have the first result."
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_agent_previewed_final_in_progress_bubble_keeps_delivery_pending(
+    monkeypatch, tmp_path
+):
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        PreviewedResponseAgent,
+        session_id="sess-previewed-response",
+        config_data={"display": {"interim_assistant_messages": True}},
+    )
+
+    assert result.get("already_sent") is not True
+    assert [call["content"] for call in adapter.sent] == ["You're welcome."]
+
+
 class TransformedStreamAgent:
     """Streams a response, then signals the gateway that a plugin hook
     (``transform_llm_output``) modified the final text after streaming
@@ -1258,8 +1334,8 @@ async def test_run_agent_queued_message_does_not_treat_commentary_as_final(monke
 
 
 @pytest.mark.asyncio
-async def test_run_agent_queued_message_delivers_first_response_media(monkeypatch, tmp_path):
-    """Queued follow-ups must preserve explicit attachments from the first turn."""
+async def test_run_agent_queued_message_preserves_literal_media_text(monkeypatch, tmp_path):
+    """Queued follow-ups preserve text without interpreting it as attachments."""
     media_path = tmp_path / "queued-first-response.png"
     media_path.write_bytes(b"not-a-real-png-but-a-real-file")
     QueuedMediaAgent.calls = 0
@@ -1284,22 +1360,16 @@ async def test_run_agent_queued_message_delivers_first_response_media(monkeypatc
         "sent_texts": [call["content"] for call in adapter.sent],
         "image_batches": adapter.image_batches,
     } == {
-        "sent_texts": ["first response"],
-        "image_batches": [
-            {
-                "chat_id": "discord-thread",
-                "images": [(media_path.as_uri(), "")],
-                "metadata": {"thread_id": "discord-thread"},
-            }
-        ],
+        "sent_texts": [f"first response\nMEDIA:{media_path}"],
+        "image_batches": [],
     }
 
 
 @pytest.mark.asyncio
-async def test_run_agent_queued_message_delivers_streamed_first_response_media(
+async def test_run_agent_queued_message_preserves_streamed_literal_media_text(
     monkeypatch, tmp_path,
 ):
-    """Streaming first-turn text must not suppress its explicit attachment."""
+    """Streamed file-looking text never implicitly uploads a local file."""
     media_path = tmp_path / "queued-streamed-first-response.png"
     media_path.write_bytes(b"not-a-real-png-but-a-real-file")
     QueuedMediaAgent.calls = 0
@@ -1325,14 +1395,8 @@ async def test_run_agent_queued_message_delivers_streamed_first_response_media(
     assert result["final_response"] == "follow-up processed"
     assert isinstance(adapter, MediaCaptureProgressAdapter)
     all_text = [call["content"] for call in adapter.sent + adapter.edits]
-    assert all("MEDIA:" not in text for text in all_text)
-    assert adapter.image_batches == [
-        {
-            "chat_id": "discord-thread",
-            "images": [(media_path.as_uri(), "")],
-            "metadata": {"thread_id": "discord-thread"},
-        }
-    ]
+    assert any(f"MEDIA:{media_path}" in text for text in all_text)
+    assert adapter.image_batches == []
 
 
 @pytest.mark.asyncio

@@ -5230,7 +5230,11 @@ class TurnRunner:
         # minimal plugin adapters) may not define edit_message at all —
         # "missing" means the same thing as "base no-op": can't edit.
         _adapter_edit = getattr(type(adapter), "edit_message", None)
-        if _adapter_edit is None or _adapter_edit is BasePlatformAdapter.edit_message:
+        if (
+            _adapter_edit is None
+            or _adapter_edit is BasePlatformAdapter.edit_message
+            or not getattr(adapter, "SUPPORTS_MESSAGE_EDITING", True)
+        ):
             while not ctx.progress_queue.empty():
                 try:
                     ctx.progress_queue.get_nowait()
@@ -5379,6 +5383,55 @@ class TurnRunner:
             progress_lines = groups[-1]
             return True
 
+        async def _flush_progress_lines() -> None:
+            nonlocal progress_msg_id, progress_lines
+            if not progress_lines:
+                return
+            if can_edit:
+                await _roll_progress_overflow_if_needed()
+                full_text = _progress_text(progress_lines)
+                try:
+                    if progress_msg_id:
+                        await _edit_progress_message(progress_msg_id, full_text)
+                    else:
+                        result = await _send_progress_text(full_text)
+                        if getattr(result, "success", False) and getattr(
+                            result, "message_id", None
+                        ):
+                            progress_msg_id = result.message_id
+                except Exception:
+                    pass
+            else:
+                while progress_lines:
+                    line = progress_lines.pop(0)
+                    try:
+                        await _send_progress_text(str(line))
+                    except Exception:
+                        pass
+
+        async def _drain_progress_queue() -> None:
+            nonlocal progress_msg_id, progress_lines
+            while not ctx.progress_queue.empty():
+                try:
+                    raw = ctx.progress_queue.get_nowait()
+                    if isinstance(raw, tuple) and len(raw) == 3 and raw[0] == "__dedup__":
+                        _, base_msg, count = raw
+                        if progress_lines:
+                            progress_lines[-1] = f"{base_msg} (×{count + 1})"
+                            await _roll_progress_overflow_if_needed()
+                    elif isinstance(raw, tuple) and len(raw) >= 1 and raw[0] == "__reset__":
+                        await _flush_progress_lines()
+                        progress_msg_id = None
+                        progress_lines = []
+                        ctx.last_progress_msg[0] = None
+                        ctx.repeat_count[0] = 0
+                    else:
+                        progress_lines.append(raw)
+                        await _roll_progress_overflow_if_needed()
+                except Exception:
+                    break
+            await _flush_progress_lines()
+
         while True:
             try:
                 if not ctx._run_still_current():
@@ -5524,46 +5577,13 @@ class TurnRunner:
                     await adapter.send_typing(ctx.source.chat_id, metadata=ctx._progress_metadata)
 
             except queue.Empty:
-                await asyncio.sleep(0.3)
+                try:
+                    await asyncio.sleep(0.3)
+                except asyncio.CancelledError:
+                    await _drain_progress_queue()
+                    return
             except asyncio.CancelledError:
-                # Drain remaining queued messages
-                while not ctx.progress_queue.empty():
-                    try:
-                        raw = ctx.progress_queue.get_nowait()
-                        if isinstance(raw, tuple) and len(raw) == 3 and raw[0] == "__dedup__":
-                            _, base_msg, count = raw
-                            if progress_lines:
-                                progress_lines[-1] = f"{base_msg} (×{count + 1})"
-                                await _roll_progress_overflow_if_needed()
-                        elif isinstance(raw, tuple) and len(raw) >= 1 and raw[0] == "__reset__":
-                            # Content-bubble marker during drain: close off
-                            # the current progress bubble and start a fresh
-                            # one for any tool lines that arrived after.
-                            await _roll_progress_overflow_if_needed()
-                            if can_edit and progress_lines and progress_msg_id:
-                                _pending_text = _progress_text(progress_lines)
-                                try:
-                                    await _edit_progress_message(progress_msg_id, _pending_text)
-                                except Exception:
-                                    pass
-                            progress_msg_id = None
-                            progress_lines = []
-                            ctx.last_progress_msg[0] = None
-                            ctx.repeat_count[0] = 0
-                        else:
-                            progress_lines.append(raw)
-                            await _roll_progress_overflow_if_needed()
-                    except Exception:
-                        break
-                # Final edit with all remaining tools (only if editing works)
-                if can_edit and progress_lines and progress_msg_id:
-                    await _roll_progress_overflow_if_needed()
-                if can_edit and progress_lines and progress_msg_id:
-                    full_text = _progress_text(progress_lines)
-                    try:
-                        await _edit_progress_message(progress_msg_id, full_text)
-                    except Exception:
-                        pass
+                await _drain_progress_queue()
                 return
             except Exception as e:
                 logger.error("Progress message error: %s", e)
@@ -5885,7 +5905,9 @@ class TurnRunner:
         )
         _want_stream_deltas = _streaming_enabled
         _want_interim_messages = ctx.interim_assistant_messages_enabled
-        _want_interim_consumer = _want_interim_messages
+        _want_interim_consumer = (
+            _want_interim_messages and not ctx._progress_bubble_for_interim
+        )
         if _want_stream_deltas or _want_interim_consumer:
             try:
                 from gateway.stream_consumer import GatewayStreamConsumer
@@ -5933,7 +5955,11 @@ class TurnRunner:
         def _interim_assistant_cb(text: str, *, already_streamed: bool = False) -> None:
             if not ctx._run_still_current():
                 return
-            display_text = text
+            display_text = str(text or "").strip()
+            if ctx._progress_bubble_for_interim:
+                if display_text:
+                    ctx.progress_queue.put(display_text)
+                return
             if _stream_consumer is not None:
                 if already_streamed:
                     _stream_consumer.on_segment_break()
@@ -30303,8 +30329,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             source.platform != Platform.WEBHOOK
             and interim_assistant_messages_mode != "off"
         )
-        # thinking_progress is independent — if enabled, we need the progress
-        # queue even when tool_progress is off (thinking relay uses same infra).
+        # Thinking progress and interim commentary are independent — if either
+        # is enabled, use the progress sender even when tool progress is off.
         # Mattermost requires a per-platform opt-in: global scratch-text display
         # is too easy to leak into busy public threads.
         _thinking_mode = _display_surface_mode(
@@ -30333,6 +30359,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 logger.debug("Slack native task-card config check failed", exc_info=True)
         needs_progress_queue = (
             tool_progress_enabled or _thinking_enabled or _native_slack_task_cards
+            or interim_assistant_messages_enabled
         )
 
 
@@ -30392,6 +30419,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             _cleanup_progress = False
             _cleanup_adapter = None
         _cleanup_msg_ids: List[str] = []
+        _progress_adapter_for_interim = self._adapter_for_source(source)
+        _progress_adapter_edit = getattr(
+            type(_progress_adapter_for_interim),
+            "edit_message",
+            BasePlatformAdapter.edit_message,
+        )
+        _progress_adapter_can_edit = (
+            _progress_adapter_for_interim is not None
+            and _progress_adapter_edit is not BasePlatformAdapter.edit_message
+            and getattr(_progress_adapter_for_interim, "SUPPORTS_MESSAGE_EDITING", True)
+        )
+        _progress_bubble_for_interim = (
+            progress_queue is not None and _progress_adapter_can_edit
+        )
         # First-touch onboarding latch: fires at most once per run, even if
         # several tools exceed the threshold.
         long_tool_hint_fired = [False]
@@ -30426,6 +30467,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             interim_assistant_messages_enabled=interim_assistant_messages_enabled,
             needs_progress_queue=needs_progress_queue,
             _native_slack_task_cards=_native_slack_task_cards,
+            _progress_bubble_for_interim=_progress_bubble_for_interim,
             _voice_ack_fired=_voice_ack_fired,
             _voice_ack_guild=_voice_ack_guild,
             _voice_ack_loop=_voice_ack_loop,
